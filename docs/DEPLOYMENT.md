@@ -8,10 +8,10 @@
 
 ## 在联网构建机生成离线包
 
-进入本目录执行：
+进入项目根目录执行：
 
 ```bash
-./build_offline_bundle.sh /tmp/youbu-annotation-offline
+./scripts/build_offline_bundle.sh /tmp/youbu-annotation-offline
 ```
 
 脚本生成 `/tmp/youbu-annotation-offline.tar.gz`。其中包含应用 wheel、全部 Python 依赖 wheel、校验文件、安装脚本和本文档。输出路径必须尚不存在，避免混入旧 wheel。

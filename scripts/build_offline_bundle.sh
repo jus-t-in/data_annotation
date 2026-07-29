@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 python=${PYTHON:-python3}
 output=${1:-"$root/dist/youbu-annotation-offline"}
 
@@ -17,7 +18,7 @@ fi
 
 mkdir -p "$output/wheels"
 "$python" -m pip wheel --wheel-dir "$output/wheels" "$root"
-cp "$root/install_offline.sh" "$root/DEPLOYMENT.md" "$output/"
+cp "$script_dir/install_offline.sh" "$root/docs/DEPLOYMENT.md" "$output/"
 
 (
   cd "$output"

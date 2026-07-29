@@ -36,7 +36,7 @@ python3 -m venv .venv
 .venv/bin/python -m pip install /path/to/youbu_annotation-0.1.0-py3-none-any.whl
 ```
 
-单个应用 wheel 不包含第三方依赖。无网络的新机器应使用 [DEPLOYMENT.md](DEPLOYMENT.md) 中的完整离线包流程。
+单个应用 wheel 不包含第三方依赖。无网络的新机器应使用 [离线部署文档](docs/DEPLOYMENT.md) 中的完整离线包流程。
 
 ## 命令入口
 
@@ -49,7 +49,7 @@ youbu-annotation-aid
 youbu-visualize
 ```
 
-每个命令均支持 --help。源码仓库根目录的 annotation_editor.py、auto_annotate.py、annotation_aid.py 和 visualize_leg_positions.py 仅作为旧调用方式的兼容包装器。
+每个命令均支持 --help。本项目不保留根目录包装脚本；安装后也可通过 `python -m youbu_annotation.<模块名>` 运行对应模块。
 
 ## 桌面编辑器
 
@@ -161,19 +161,20 @@ session_id,trial_id,input_file,timestamp,activity_truth,terrain_truth,notes
 
 | 路径 | 职责 |
 |------|------|
-| editor.py | 桌面命令入口 |
-| gui.py | PySide6/pyqtgraph 主窗口 |
-| trial.py | CSV 校验、采样归一化和显示信号 |
-| model.py | 边界、确认标记、撤销、QA 和结构校验 |
-| auto_annotate.py | 离线识别算法与 CLI |
-| auto_adapter.py | 识别结果到可编辑文档的适配 |
-| annotation_aid.py | 标定与复核辅助 CLI |
-| visualize_leg_positions.py | 静态可视化 CLI |
-| storage.py | 聚合 CSV、报告、锁、备份和事务保存 |
-| recovery.py | XDG 恢复草稿 |
-| renderer.py | 编辑器 PNG 导出 |
+| src/youbu_annotation/editor.py | 桌面命令入口 |
+| src/youbu_annotation/gui.py | PySide6/pyqtgraph 主窗口 |
+| src/youbu_annotation/trial.py | CSV 校验、采样归一化和显示信号 |
+| src/youbu_annotation/model.py | 边界、确认标记、撤销、QA 和结构校验 |
+| src/youbu_annotation/auto_annotate.py | 离线识别算法与 CLI |
+| src/youbu_annotation/auto_adapter.py | 识别结果到可编辑文档的适配 |
+| src/youbu_annotation/annotation_aid.py | 标定与复核辅助 CLI |
+| src/youbu_annotation/visualize_leg_positions.py | 静态可视化 CLI |
+| src/youbu_annotation/storage.py | 聚合 CSV、报告、锁、备份和事务保存 |
+| src/youbu_annotation/recovery.py | XDG 恢复草稿 |
+| src/youbu_annotation/renderer.py | 编辑器 PNG 导出 |
 | pyproject.toml | wheel 元数据和命令入口 |
-| build_offline_bundle.sh | 完整离线包构建 |
-| install_offline.sh | 目标机无网络安装 |
+| scripts/build_offline_bundle.sh | 完整离线包构建 |
+| scripts/install_offline.sh | 目标机无网络安装 |
+| docs/DEPLOYMENT.md | 离线部署说明 |
 
 自动识别方法和桌面技术决策见 docs/adr。首版不支持视频、流式采集、遥测、任意标签模式、多标签页或参考标注对照视图。

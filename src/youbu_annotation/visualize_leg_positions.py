@@ -21,7 +21,7 @@ try:
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
 except ImportError:
-    raise SystemExit("缺少 matplotlib，请先运行：python3 -m pip install -r requirements.txt")
+    raise SystemExit("缺少 matplotlib，请先安装项目运行依赖：python3 -m pip install .")
 
 plt.rcParams["font.sans-serif"] = ["Noto Sans CJK SC", "Droid Sans Fallback", "sans-serif"]
 plt.rcParams["axes.unicode_minus"] = False

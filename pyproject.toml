@@ -27,14 +27,4 @@ youbu-visualize = "youbu_annotation.visualize_leg_positions:main"
 
 [tool.setuptools]
 packages = ["youbu_annotation"]
-package-dir = {youbu_annotation = "."}
-include-package-data = true
-
-[tool.setuptools.package-data]
-youbu_annotation = [
-  "CONTEXT.md",
-  "DEPLOYMENT.md",
-  "README.md",
-  "requirements.txt",
-  "*.sh",
-]
+package-dir = {"" = "src"}
