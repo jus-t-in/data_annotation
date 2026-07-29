@@ -1,0 +1,6 @@
+include CONTEXT.md
+include DEPLOYMENT.md
+include README.md
+include requirements.txt
+include *.sh
+recursive-include docs *.md
