@@ -48,6 +48,10 @@ youbu-auto-annotate
 youbu-annotation-aid
 youbu-visualize
 ```
+进入youbu_annotation路径下，执行
+'''
+uv run youbu-annotation
+'''
 
 每个命令均支持 --help。本项目不保留根目录包装脚本；安装后也可通过 `python -m youbu_annotation.<模块名>` 运行对应模块。
 

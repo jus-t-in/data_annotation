@@ -40,6 +40,37 @@ from .storage import AnnotationRepository, AnnotationStorageError
 from .trial import TrialData, TrialValidationError
 
 
+KIND_NAMES = {
+    "initial": "起始",
+    "boundary": "边界",
+    ConfirmationKind.STAIR_SECOND_STEP.value: "第二步确认",
+    ConfirmationKind.TRIAL_END.value: "收尾确认",
+}
+SOURCE_NAMES = {
+    Provenance.AUTO: "自动",
+    Provenance.ADJUSTED: "已调整",
+    Provenance.MANUAL: "人工",
+    Provenance.IMPORTED_UNKNOWN: "来源不明",
+}
+
+
+class EventLabel(pg.TextItem):
+    clicked = QtCore.Signal(str)
+
+    def __init__(self, component_id: str, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.component_id = component_id
+        self.setAcceptedMouseButtons(QtCore.Qt.MouseButton.LeftButton)
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.component_id)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class TaskSignals(QtCore.QObject):
     finished = QtCore.Signal(object)
     failed = QtCore.Signal(str, str)
@@ -82,10 +113,12 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.interval_end: int | None = None
         self._refreshing = False
         self._syncing_range = False
+        self._syncing_cursor = False
         self._busy = False
         self._state_items: list[object] = []
+        self._main_annotation_items: list[object] = []
         self._markers: dict[str, pg.InfiniteLine] = {}
-        self._cursor_lines: list[pg.InfiniteLine] = []
+        self._cursor_lines: list[tuple[pg.PlotItem, pg.InfiniteLine]] = []
         self._raw_curves: list[pg.PlotDataItem] = []
         self._build_actions()
         self._build_ui()
@@ -115,6 +148,16 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.recognize_action = QtGui.QAction(self._icon(style.SP_BrowserReload), "重新识别", self)
         self.delete_action = QtGui.QAction(self._icon(style.SP_TrashIcon), "删除所选分量", self)
         self.delete_action.setShortcut(QtGui.QKeySequence.StandardKey.Delete)
+        self.auxiliary_actions: dict[str, QtGui.QAction] = {}
+        for name, label, default in (
+            ("overview", "全局概览", True),
+            ("pitch", "俯仰", False),
+            ("motion", "运动/冲击", False),
+        ):
+            action = QtGui.QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(self.settings.value(f"plots/{name}", default, type=bool))
+            self.auxiliary_actions[name] = action
 
         file_menu = self.menuBar().addMenu("文件")
         file_menu.addActions((self.open_action, self.target_action, self.save_action, self.export_action))
@@ -151,6 +194,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
 
     def _build_ui(self) -> None:
         root = QtWidgets.QWidget()
+        root.setObjectName("centralRoot")
         root_layout = QtWidgets.QVBoxLayout(root)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
@@ -161,38 +205,59 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         header_layout.setContentsMargins(12, 7, 12, 7)
         self.source_label = QtWidgets.QLabel("未打开试次")
         self.source_label.setObjectName("sourceLabel")
+        self.source_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
         self.target_label = QtWidgets.QLabel("标注文件：未选择")
         self.target_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.target_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
         self.review_badge = QtWidgets.QLabel("未载入")
         self.review_badge.setObjectName("reviewBadge")
         self.raw_checkbox = QtWidgets.QCheckBox("原始通道")
+        self.auxiliary_button = QtWidgets.QToolButton()
+        self.auxiliary_button.setObjectName("auxiliaryButton")
+        self.auxiliary_button.setText("辅助图")
+        self.auxiliary_button.setIcon(self._icon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView))
+        self.auxiliary_button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.auxiliary_button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        auxiliary_menu = QtWidgets.QMenu(self.auxiliary_button)
+        auxiliary_menu.addActions(tuple(self.auxiliary_actions.values()))
+        self.auxiliary_button.setMenu(auxiliary_menu)
         header_layout.addWidget(self.source_label, 0, 0)
         header_layout.addWidget(self.review_badge, 0, 1, 2, 1, QtCore.Qt.AlignmentFlag.AlignRight)
         header_layout.addWidget(self.target_label, 1, 0)
         header_layout.addWidget(self.raw_checkbox, 0, 2, 2, 1)
+        header_layout.addWidget(self.auxiliary_button, 0, 3, 2, 1)
         header_layout.setColumnStretch(0, 1)
         root_layout.addWidget(header)
 
-        main_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        left_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        self.left_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.left_splitter.setChildrenCollapsible(False)
         self.graphics = pg.GraphicsLayoutWidget()
         self.overview_plot = self.graphics.addPlot(row=0, col=0)
-        self.leg_plot = self.graphics.addPlot(row=1, col=0)
-        self.pitch_plot = self.graphics.addPlot(row=2, col=0)
-        self.motion_plot = self.graphics.addPlot(row=3, col=0)
-        self.state_plot = self.graphics.addPlot(row=4, col=0)
-        self.graphics.ci.layout.setRowFixedHeight(0, 60)
-        self.graphics.ci.layout.setRowFixedHeight(2, 80)
-        self.graphics.ci.layout.setRowFixedHeight(3, 80)
-        self.graphics.ci.layout.setRowFixedHeight(4, 84)
+        self.annotation_plot = self.graphics.addPlot(row=1, col=0)
+        self.leg_plot = self.graphics.addPlot(row=2, col=0)
+        self.pitch_plot = self.graphics.addPlot(row=3, col=0)
+        self.motion_plot = self.graphics.addPlot(row=4, col=0)
+        self.state_plot = self.graphics.addPlot(row=5, col=0)
+        self.graphics.ci.layout.setRowFixedHeight(1, 84)
+        self.graphics.ci.layout.setRowFixedHeight(5, 92)
+        self._auxiliary_plots = {
+            "overview": (self.overview_plot, 0, 38),
+            "pitch": (self.pitch_plot, 3, 48),
+            "motion": (self.motion_plot, 4, 48),
+        }
         self._configure_plots()
-        left_splitter.addWidget(self.graphics)
+        self._apply_auxiliary_visibility()
+        self.left_splitter.addWidget(self.graphics)
 
         self.event_table = QtWidgets.QTableWidget(0, 6)
         self.event_table.setHorizontalHeaderLabels(("时刻", "类型", "活动", "地形", "来源", "备注"))
         self.event_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.event_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.event_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.event_table.setAlternatingRowColors(True)
+        self.event_table.setShowGrid(False)
         self.event_table.verticalHeader().hide()
         self.event_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.event_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
@@ -200,13 +265,13 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.event_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.event_table.horizontalHeader().setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.event_table.horizontalHeader().setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        left_splitter.addWidget(self.event_table)
-        left_splitter.setSizes([620, 220])
-        main_splitter.addWidget(left_splitter)
-        main_splitter.addWidget(self._build_inspector())
-        main_splitter.setSizes([1080, 340])
-        main_splitter.setStretchFactor(0, 1)
-        root_layout.addWidget(main_splitter, 1)
+        self.left_splitter.addWidget(self.event_table)
+        self.left_splitter.setSizes([720, 120])
+        self.main_splitter.addWidget(self.left_splitter)
+        self.main_splitter.addWidget(self._build_inspector())
+        self.main_splitter.setSizes([1080, 340])
+        self.main_splitter.setStretchFactor(0, 1)
+        root_layout.addWidget(self.main_splitter, 1)
         self.setCentralWidget(root)
 
         self.progress = QtWidgets.QProgressBar()
@@ -217,6 +282,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
 
     def _build_inspector(self) -> QtWidgets.QWidget:
         content = QtWidgets.QWidget()
+        content.setObjectName("inspector")
         layout = QtWidgets.QVBoxLayout(content)
         layout.setContentsMargins(10, 10, 10, 12)
         layout.setSpacing(9)
@@ -249,6 +315,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.evidence_label.setWordWrap(True)
         self.evidence_label.setObjectName("evidence")
         self.delete_button = QtWidgets.QPushButton(self.delete_action.icon(), "删除分量")
+        self.delete_button.setObjectName("dangerButton")
         selected_form.addRow("真实时刻", self.timestamp_label)
         selected_form.addRow("事件分量", self.component_combo)
         selected_form.addRow("相对时刻", time_row)
@@ -353,9 +420,17 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.overview_plot.hideAxis("left")
         self.overview_plot.hideAxis("bottom")
         self.overview_plot.setMouseEnabled(x=True, y=False)
+        self.annotation_plot.setMenuEnabled(False)
+        self.annotation_plot.setMouseEnabled(x=True, y=False)
+        self.annotation_plot.setYRange(0, 3, padding=0)
+        self.annotation_plot.setLabel("left", "标注")
+        self.annotation_plot.getAxis("left").setTicks([])
+        self.annotation_plot.hideAxis("bottom")
         plots = (self.leg_plot, self.pitch_plot, self.motion_plot, self.state_plot)
         for plot in plots:
-            plot.showGrid(x=False, y=True, alpha=0.18)
+            plot.setMenuEnabled(False)
+            plot.hideButtons()
+            plot.showGrid(x=False, y=True, alpha=0.22)
             plot.setClipToView(True)
             plot.setDownsampling(auto=True, mode="peak")
         self.leg_plot.setLabel("left", "腿部位置")
@@ -365,28 +440,69 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.state_plot.getAxis("left").setTicks([[(0.45, "地形"), (1.45, "活动"), (2.45, "确认")]])
         self.state_plot.setYRange(0, 3, padding=0)
         self.state_plot.setMouseEnabled(x=True, y=False)
-        for plot in (self.pitch_plot, self.motion_plot, self.state_plot):
+        for plot in (self.annotation_plot, self.pitch_plot, self.motion_plot, self.state_plot):
             plot.setXLink(self.leg_plot)
+        for plot in (self.annotation_plot, self.leg_plot, self.pitch_plot, self.motion_plot, self.state_plot):
+            plot.getAxis("left").setWidth(62)
+            for axis_name in ("left", "bottom"):
+                axis = plot.getAxis(axis_name)
+                axis.setPen(pg.mkPen("#aeb4b7", width=0.8))
+                axis.setTextPen(pg.mkPen("#3e4548"))
+                axis.setTickFont(QtGui.QFont("Noto Sans CJK SC", 8))
+        for plot in (self.leg_plot, self.pitch_plot, self.motion_plot):
+            plot.hideAxis("bottom")
+        legend = self.leg_plot.addLegend(offset=(10, 8), labelTextColor="#303638")
+        legend.setBrush(pg.mkBrush(255, 255, 255, 215))
+        legend.setPen(pg.mkPen("#c9cdcf", width=0.7))
         self.leg_plot.sigXRangeChanged.connect(self._detail_range_changed)
         self.graphics.scene().sigMouseClicked.connect(self._plot_clicked)
+
+    def _apply_auxiliary_visibility(self) -> None:
+        for name, action in self.auxiliary_actions.items():
+            self._set_auxiliary_visible(name, action.isChecked(), persist=False)
+
+    def _set_auxiliary_visible(self, name: str, visible: bool, *, persist: bool = True) -> None:
+        plot, row, height = self._auxiliary_plots[name]
+        plot.setVisible(visible)
+        self.graphics.ci.layout.setRowFixedHeight(row, height if visible else 0)
+        self.graphics.ci.layout.invalidate()
+        if persist:
+            self.settings.setValue(f"plots/{name}", visible)
 
     def _apply_style(self) -> None:
         self.setStyleSheet(
             """
-            QMainWindow, QWidget { background: #f7f8f8; color: #263238; font-family: "Noto Sans CJK SC", sans-serif; }
-            QFrame#header { background: #ffffff; border-bottom: 1px solid #cfd8dc; }
-            QLabel#sourceLabel { font-size: 15px; font-weight: 600; }
-            QLabel#reviewBadge { padding: 3px 8px; border: 1px solid #90a4ae; border-radius: 4px; background: #eceff1; }
-            QGroupBox { background: #ffffff; border: 1px solid #cfd8dc; border-radius: 4px; margin-top: 8px; padding-top: 8px; font-weight: 600; }
-            QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 3px; }
-            QLineEdit, QComboBox, QDoubleSpinBox, QListWidget, QTableWidget { background: #ffffff; border: 1px solid #b0bec5; selection-background-color: #00796b; selection-color: white; }
-            QPushButton, QToolButton { background: #ffffff; border: 1px solid #90a4ae; border-radius: 3px; padding: 4px 7px; }
-            QPushButton:hover, QToolButton:hover { background: #e8f5e9; border-color: #388e3c; }
-            QPushButton:disabled, QToolButton:disabled { color: #9e9e9e; background: #eeeeee; }
-            QLabel#evidence { color: #455a64; font-size: 11px; }
-            QLabel#validation { color: #b71c1c; }
-            QHeaderView::section { background: #eceff1; padding: 5px; border: 0; border-right: 1px solid #cfd8dc; border-bottom: 1px solid #cfd8dc; }
-            QToolBar { background: #fafafa; border-bottom: 1px solid #cfd8dc; spacing: 3px; }
+            QMainWindow, QWidget { color: #24292c; font-family: "Noto Sans CJK SC", sans-serif; font-size: 12px; }
+            QMainWindow, QWidget#centralRoot { background: #f2f3f3; }
+            QFrame#header { background: #ffffff; border-bottom: 1px solid #c8ccce; }
+            QLabel#sourceLabel { font-size: 15px; font-weight: 600; color: #1f2528; }
+            QLabel#reviewBadge { padding: 3px 8px; border: 1px solid #8d969a; border-radius: 3px; background: #f4f5f5; }
+            QWidget#inspector, QScrollArea, QScrollArea > QWidget > QWidget { background: #ffffff; }
+            QScrollArea { border: 0; border-left: 1px solid #c8ccce; }
+            QGroupBox { background: #ffffff; border: 0; border-top: 1px solid #d7d9da; margin-top: 13px; padding-top: 10px; font-weight: 600; }
+            QGroupBox::title { subcontrol-origin: margin; left: 0; padding: 0 5px 0 0; background: #ffffff; }
+            QLineEdit, QComboBox, QDoubleSpinBox, QListWidget, QTableWidget { background: #ffffff; border: 1px solid #aeb4b7; border-radius: 2px; selection-background-color: #356f72; selection-color: #ffffff; }
+            QLineEdit, QComboBox, QDoubleSpinBox { min-height: 25px; padding: 1px 5px; }
+            QComboBox::drop-down { border: 0; width: 22px; }
+            QListWidget, QTableWidget { alternate-background-color: #f6f7f7; outline: 0; }
+            QPushButton, QToolButton { background: #ffffff; border: 1px solid #969da0; border-radius: 3px; min-height: 25px; padding: 2px 7px; }
+            QPushButton:hover, QToolButton:hover { background: #edf4f2; border-color: #4f7774; }
+            QPushButton:pressed, QToolButton:pressed { background: #dde9e6; }
+            QPushButton:disabled, QToolButton:disabled { color: #9ca1a3; background: #f0f1f1; border-color: #d4d6d7; }
+            QPushButton#dangerButton { color: #a3312b; border-color: #c69a96; }
+            QPushButton#dangerButton:hover { background: #fbefee; border-color: #a3312b; }
+            QLabel#evidence { color: #505b60; font-size: 11px; }
+            QLabel#validation { color: #a3312b; }
+            QHeaderView::section { background: #e9ebeb; padding: 5px; border: 0; border-right: 1px solid #c8ccce; border-bottom: 1px solid #c8ccce; font-weight: 600; }
+            QToolBar, QMenuBar, QStatusBar { background: #f7f8f8; }
+            QToolBar { border-bottom: 1px solid #c8ccce; spacing: 2px; padding: 2px 5px; }
+            QMenuBar { border-bottom: 1px solid #d5d8d9; }
+            QMenu { background: #ffffff; border: 1px solid #aeb4b7; padding: 3px; }
+            QMenu::item { padding: 5px 24px 5px 8px; }
+            QMenu::item:selected { background: #e6efed; color: #1f2528; }
+            QSplitter::handle { background: #c8ccce; }
+            QSplitter::handle:horizontal { width: 1px; }
+            QSplitter::handle:vertical { height: 1px; }
             """
         )
 
@@ -401,6 +517,8 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.delete_action.triggered.connect(self.delete_selected)
         self.delete_button.clicked.connect(self.delete_selected)
         self.raw_checkbox.toggled.connect(self._toggle_raw)
+        for name, action in self.auxiliary_actions.items():
+            action.toggled.connect(partial(self._set_auxiliary_visible, name))
         self.event_table.currentCellChanged.connect(self._table_selection_changed)
         self.component_combo.currentIndexChanged.connect(self._component_changed)
         self.time_spin.editingFinished.connect(self._time_edited)
@@ -614,8 +732,17 @@ class AnnotationEditor(QtWidgets.QMainWindow):
     def _plot_trial(self) -> None:
         assert self.trial is not None
         trial = self.trial
-        for plot in (self.overview_plot, self.leg_plot, self.pitch_plot, self.motion_plot, self.state_plot):
+        self._clear_cursor_lines()
+        for plot in (
+            self.overview_plot,
+            self.annotation_plot,
+            self.leg_plot,
+            self.pitch_plot,
+            self.motion_plot,
+            self.state_plot,
+        ):
             plot.clear()
+        self._main_annotation_items.clear()
         x = trial.seconds
         plot_options = {"autoDownsample": True}
         self.overview_plot.plot(x, trial.channels["display/left"], pen=pg.mkPen(LEFT_COLOR, width=1), **plot_options)
@@ -657,14 +784,113 @@ class AnnotationEditor(QtWidgets.QMainWindow):
                 region.setZValue(-5)
                 plot.addItem(region)
 
+    def _clear_cursor_lines(self) -> None:
+        for plot, cursor in self._cursor_lines:
+            plot.removeItem(cursor)
+        self._cursor_lines.clear()
+
+    @staticmethod
+    def _event_short_label(event) -> str:
+        kind = KIND_NAMES[event.kind]
+        if event.kind in {ConfirmationKind.STAIR_SECOND_STEP.value, ConfirmationKind.TRIAL_END.value}:
+            return kind
+        return f"{kind}  {state_name(event.activity, event.terrain)}"
+
+    def _event_tooltip(self, event) -> str:
+        assert self.trial is not None
+        lines = [
+            self.trial.timestamp(event.sample_index),
+            f"{KIND_NAMES[event.kind]}：{state_name(event.activity, event.terrain)}",
+            f"来源：{SOURCE_NAMES[event.provenance]}",
+        ]
+        if event.user_note:
+            lines.append(f"备注：{event.user_note}")
+        return "\n".join(lines)
+
+    def _populate_main_annotations(self) -> None:
+        for item in self._main_annotation_items:
+            self.leg_plot.removeItem(item)
+        self._main_annotation_items.clear()
+        self.annotation_plot.clear()
+        if self.trial is None or self.document is None:
+            return
+
+        trial, document = self.trial, self.document
+        for start_index, end_index, activity, terrain in document.intervals():
+            color = QtGui.QColor(STATE_COLORS.get((activity, terrain), "#607D8B"))
+            color.setAlpha(38)
+            region = pg.LinearRegionItem(
+                values=(float(trial.seconds[start_index]), float(trial.seconds[end_index])),
+                orientation="vertical",
+                movable=False,
+                brush=QtGui.QBrush(color),
+                pen=pg.mkPen(None),
+            )
+            region.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+            region.setZValue(-20)
+            self.leg_plot.addItem(region)
+            self._main_annotation_items.append(region)
+
+        for position, event in enumerate(document.composed_events()):
+            seconds = float(trial.seconds[event.sample_index])
+            component_id = event.component_ids[0]
+            selected = event.id == self.selected_event_id
+            confirmation = event.kind in {
+                ConfirmationKind.STAIR_SECOND_STEP.value,
+                ConfirmationKind.TRIAL_END.value,
+            }
+            color = "#a3312b" if selected else "#397779" if confirmation else "#666c6f"
+            line = pg.InfiniteLine(
+                pos=seconds,
+                angle=90,
+                movable=False,
+                pen=pg.mkPen(color, width=1.6 if selected else 0.8, style=QtCore.Qt.PenStyle.DashLine if confirmation else QtCore.Qt.PenStyle.SolidLine),
+                hoverPen=pg.mkPen("#a3312b", width=2),
+            )
+            line.setToolTip(self._event_tooltip(event))
+            line.setZValue(15)
+            line.sigClicked.connect(partial(self._annotation_clicked, component_id))
+            self.leg_plot.addItem(line)
+            self._main_annotation_items.append(line)
+
+            lane_y = 2.5 - position % 3
+            connector = pg.PlotDataItem(
+                [seconds, seconds],
+                [0.02, lane_y - 0.18],
+                pen=pg.mkPen(color, width=0.75),
+            )
+            if event.sample_index == 0:
+                anchor = (0, 0.5)
+            elif event.sample_index == len(trial.seconds) - 1:
+                anchor = (1, 0.5)
+            else:
+                anchor = (0.5, 0.5)
+            label = EventLabel(
+                component_id,
+                text=self._event_short_label(event),
+                color="#22282b",
+                anchor=anchor,
+                border=pg.mkPen(color, width=1 if selected else 0.7),
+                fill=pg.mkBrush("#fffdf9" if selected else "#ffffff"),
+                ensureInBounds=False,
+            )
+            label.setToolTip(self._event_tooltip(event))
+            label.setPos(seconds, lane_y)
+            label.clicked.connect(self._annotation_clicked)
+            self.annotation_plot.addItem(connector)
+            self.annotation_plot.addItem(label)
+        self.annotation_plot.setYRange(0, 3, padding=0)
+
     def _populate_state_plot(self) -> None:
+        self._clear_cursor_lines()
         self.state_plot.clear()
         self._markers.clear()
         self._state_items.clear()
-        self._cursor_lines.clear()
         if self.trial is None or self.document is None:
+            self._populate_main_annotations()
             return
         trial, document = self.trial, self.document
+        self._populate_main_annotations()
         duration = max(trial.duration, 1e-9)
         terrain_colors = {"LEVEL": "#78909C", "ASCENT": "#F57C00", "DESCENT": "#1976D2"}
         for start_index, end_index, activity, terrain in document.intervals():
@@ -723,10 +949,18 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             self.state_plot.addItem(line)
             self._markers[confirmation.id] = line
         for plot in (self.leg_plot, self.pitch_plot, self.motion_plot, self.state_plot):
-            cursor = pg.InfiniteLine(pos=float(trial.seconds[self.cursor_index]), angle=90, movable=False, pen=pg.mkPen("#37474F", width=1))
+            cursor = pg.InfiniteLine(
+                pos=float(trial.seconds[self.cursor_index]),
+                angle=90,
+                movable=True,
+                bounds=(float(trial.seconds[0]), float(trial.seconds[-1])),
+                pen=pg.mkPen("#303638", width=1.2),
+                hoverPen=pg.mkPen("#a3312b", width=2.2),
+            )
             cursor.setZValue(30)
+            cursor.sigPositionChanged.connect(partial(self._cursor_dragged, cursor))
             plot.addItem(cursor)
-            self._cursor_lines.append(cursor)
+            self._cursor_lines.append((plot, cursor))
         self.state_plot.setYRange(0, 3, padding=0)
         self.state_plot.setXLink(self.leg_plot)
 
@@ -741,7 +975,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         if self._syncing_range or not hasattr(self, "overview_region"):
             return
         self._syncing_range = True
-        self.overview_region.setRegion(ranges[0])
+        self.overview_region.setRegion(ranges)
         self._syncing_range = False
 
     def _plot_clicked(self, event) -> None:
@@ -759,9 +993,18 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             return
         self.cursor_index = max(0, min(len(self.trial.seconds) - 1, int(index)))
         seconds = float(self.trial.seconds[self.cursor_index])
-        for cursor in self._cursor_lines:
-            cursor.setValue(seconds)
+        self._syncing_cursor = True
+        try:
+            for _plot, cursor in self._cursor_lines:
+                cursor.setValue(seconds)
+        finally:
+            self._syncing_cursor = False
         self.cursor_label.setText(f"{seconds:.3f} s  |  {self.trial.timestamp(self.cursor_index)}")
+
+    def _cursor_dragged(self, cursor: pg.InfiniteLine, *_args) -> None:
+        if self._syncing_cursor or self.trial is None:
+            return
+        self._set_cursor(self.trial.nearest_index(float(cursor.value())))
 
     def _toggle_raw(self, visible: bool) -> None:
         for curve in self._raw_curves:
@@ -801,16 +1044,14 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         assert self.trial is not None
         self.event_table.blockSignals(True)
         self.event_table.setRowCount(len(events))
-        kind_names = {"initial": "起始", "boundary": "边界", "stair_second_step": "第二步确认", "trial_end": "收尾确认"}
-        source_names = {Provenance.AUTO: "自动", Provenance.ADJUSTED: "已调整", Provenance.MANUAL: "人工", Provenance.IMPORTED_UNKNOWN: "来源不明"}
         selected_row = -1
         for row, event in enumerate(events):
             values = (
                 self.trial.timestamp(event.sample_index),
-                kind_names[event.kind],
+                KIND_NAMES[event.kind],
                 ACTIVITY_NAMES.get(event.activity, event.activity),
                 TERRAIN_NAMES.get(event.terrain, event.terrain),
-                source_names[event.provenance],
+                SOURCE_NAMES[event.provenance],
                 event.user_note,
             )
             for column, value in enumerate(values):
@@ -908,6 +1149,15 @@ class AnnotationEditor(QtWidgets.QMainWindow):
     def _marker_clicked(self, component_id: str, *_args) -> None:
         self.selected_component_id = component_id
         self._refresh(select_component=component_id)
+
+    def _annotation_clicked(self, component_id: str, *_args) -> None:
+        if self.document is None:
+            return
+        component = next(
+            item for item in [*self.document.boundaries, *self.document.confirmations] if item.id == component_id
+        )
+        self._set_cursor(component.sample_index)
+        self._marker_clicked(component_id)
 
     def _marker_moved(self, component_id: str, line: pg.InfiniteLine, *_args) -> None:
         if self.trial is None or self.document is None:
