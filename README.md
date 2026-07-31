@@ -13,21 +13,80 @@
 
 ## 支持环境
 
-- Linux，建议 Python 3.12；Python 支持范围为 3.10-3.13。
+- Ubuntu/Debian 桌面 Linux，建议 Python 3.12；Python 支持范围为 3.10-3.13。
 - 运行依赖：PySide6、pyqtgraph、NumPy、SciPy 和 Matplotlib。
 - 中文图表建议安装 Noto Sans CJK SC。
 - 不需要网络服务或数据库。
 
-## 安装
+## 从 GitHub 部署
 
-### 联网安装源码目录
+以下命令适用于可联网的 Ubuntu/Debian 桌面系统。
 
-在本目录执行：
+### 1. 安装系统依赖
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install .
+sudo apt update
+sudo apt install -y \
+  ca-certificates git python3 python3-venv \
+  libdbus-1-3 libegl1 libfontconfig1 libgl1 libx11-xcb1 \
+  libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+  libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+  libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-xfixes0 \
+  libxcb-xkb1 libxkbcommon-x11-0
 ```
+
+中文图表建议同时安装字体：
+
+```bash
+sudo apt install -y fonts-noto-cjk
+```
+
+### 2. 克隆并安装
+
+```bash
+git clone https://github.com/jus-t-in/data_annotation.git
+cd data_annotation
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install .
+```
+
+### 3. 验证安装
+
+```bash
+python -m pip check
+youbu-annotation --version
+youbu-auto-annotate --help
+youbu-annotation-aid --help
+youbu-visualize --help
+```
+
+以上命令均成功后启动桌面编辑器：
+
+```bash
+youbu-annotation
+```
+
+以后打开新终端时，先重新进入仓库并激活虚拟环境：
+
+```bash
+cd /path/to/data_annotation
+source .venv/bin/activate
+youbu-annotation
+```
+
+也可以不激活虚拟环境，直接执行 `.venv/bin/youbu-annotation`。
+
+### 常见部署错误
+
+- `ensurepip is not available`：系统未安装 `python3-venv`。安装后删除本次失败生成的 `.venv`，再从创建虚拟环境开始执行。
+- `SSL: UNEXPECTED_EOF_WHILE_READING`：PyPI 连接被代理或网络中断。检查代理后重试，或临时使用 `python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple .`。
+- `Could not load the Qt platform plugin "xcb"`：Qt/XCB 系统库缺失。重新执行第 1 步的系统依赖安装命令。
+
+不要使用 `--trusted-host` 绕过 TLS 证书校验。
+
+## 其他部署方式
 
 ### 安装已构建的 wheel
 
@@ -48,10 +107,6 @@ youbu-auto-annotate
 youbu-annotation-aid
 youbu-visualize
 ```
-进入youbu_annotation路径下，执行
-'''
-uv run youbu-annotation
-'''
 
 每个命令均支持 --help。本项目不保留根目录包装脚本；安装后也可通过 `python -m youbu_annotation.<模块名>` 运行对应模块。
 
