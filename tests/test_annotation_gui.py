@@ -81,6 +81,44 @@ def editor(application, tmp_path: Path, trial: TrialData, document: AnnotationDo
     application.processEvents()
 
 
+def test_empty_state_transitions_to_loaded_workspace(
+    application,
+    tmp_path: Path,
+    trial: TrialData,
+    document: AnnotationDocument,
+) -> None:
+    QtCore.QSettings.setDefaultFormat(QtCore.QSettings.Format.IniFormat)
+    QtCore.QSettings.setPath(QtCore.QSettings.Format.IniFormat, QtCore.QSettings.Scope.UserScope, str(tmp_path))
+    window = AnnotationEditor()
+    window.show()
+    application.processEvents()
+    try:
+        assert window.workspace_stack.currentWidget() is window.empty_state
+        assert window.empty_open_button.isVisible()
+        assert not window.save_action.isEnabled()
+
+        window.load_session(trial, document)
+        application.processEvents()
+
+        assert window.workspace_stack.currentWidget() is window.main_splitter
+        assert window.event_count_label.text() == f"{len(document.composed_events())} 项"
+        assert window.source_label.text().startswith("P01_S01 / T01")
+    finally:
+        window._dispose_session()
+        window.close()
+
+
+def test_toolbar_groups_actions_and_emphasizes_save(editor: AnnotationEditor) -> None:
+    save_button = editor.toolbar.widgetForAction(editor.save_action)
+    assert isinstance(save_button, QtWidgets.QToolButton)
+    assert save_button.objectName() == "primaryToolButton"
+    assert sum(action.isSeparator() for action in editor.toolbar.actions()) == 3
+    for action in (editor.undo_action, editor.redo_action):
+        button = editor.toolbar.widgetForAction(action)
+        assert isinstance(button, QtWidgets.QToolButton)
+        assert button.toolButtonStyle() is QtCore.Qt.ToolButtonStyle.ToolButtonIconOnly
+
+
 def test_auxiliary_plot_defaults_and_persistence(editor: AnnotationEditor, application) -> None:
     assert editor.auxiliary_actions["overview"].isChecked()
     assert not editor.auxiliary_actions["pitch"].isChecked()

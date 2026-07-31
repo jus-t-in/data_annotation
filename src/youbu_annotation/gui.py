@@ -95,7 +95,7 @@ class BackgroundTask(QtCore.QRunnable):
 class AnnotationEditor(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        pg.setConfigOptions(antialias=False, background="#FAFAFA", foreground="#37474F")
+        pg.setConfigOptions(antialias=False, background="#f8faf9", foreground="#45514c")
         self.setWindowTitle(f"{APP_NAME} {VERSION}")
         self.resize(1440, 900)
         self.setMinimumSize(1100, 680)
@@ -169,19 +169,29 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         help_menu.addAction("关于", self._about)
 
         toolbar = self.addToolBar("主要操作")
+        toolbar.setObjectName("mainToolbar")
         toolbar.setMovable(False)
+        toolbar.setIconSize(QtCore.QSize(17, 17))
         toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        toolbar.addActions(
-            (
-                self.open_action,
-                self.target_action,
-                self.save_action,
-                self.undo_action,
-                self.redo_action,
-                self.recognize_action,
-                self.export_action,
-            )
-        )
+        self.open_action.setIconText("打开试次")
+        self.target_action.setIconText("标注文件")
+        toolbar.addActions((self.open_action, self.target_action))
+        toolbar.addSeparator()
+        toolbar.addAction(self.save_action)
+        toolbar.addSeparator()
+        toolbar.addActions((self.undo_action, self.redo_action))
+        toolbar.addSeparator()
+        toolbar.addActions((self.recognize_action, self.export_action))
+        self.toolbar = toolbar
+        save_button = toolbar.widgetForAction(self.save_action)
+        if isinstance(save_button, QtWidgets.QToolButton):
+            save_button.setObjectName("primaryToolButton")
+        for action in (self.undo_action, self.redo_action):
+            button = toolbar.widgetForAction(action)
+            if isinstance(button, QtWidgets.QToolButton):
+                button.setObjectName("historyToolButton")
+                button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonIconOnly)
+                button.setFixedWidth(32)
         self.session_actions = [
             self.target_action,
             self.save_action,
@@ -202,15 +212,20 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         header = QtWidgets.QFrame()
         header.setObjectName("header")
         header_layout = QtWidgets.QGridLayout(header)
-        header_layout.setContentsMargins(12, 7, 12, 7)
+        header_layout.setContentsMargins(16, 10, 14, 10)
+        header_layout.setHorizontalSpacing(14)
+        header_layout.setVerticalSpacing(2)
         self.source_label = QtWidgets.QLabel("未打开试次")
         self.source_label.setObjectName("sourceLabel")
         self.source_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
         self.target_label = QtWidgets.QLabel("标注文件：未选择")
+        self.target_label.setObjectName("targetLabel")
         self.target_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         self.target_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
         self.review_badge = QtWidgets.QLabel("未载入")
         self.review_badge.setObjectName("reviewBadge")
+        self.review_badge.setProperty("status", "empty")
+        self.review_badge.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.raw_checkbox = QtWidgets.QCheckBox("原始通道")
         self.auxiliary_button = QtWidgets.QToolButton()
         self.auxiliary_button.setObjectName("auxiliaryButton")
@@ -221,11 +236,15 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         auxiliary_menu = QtWidgets.QMenu(self.auxiliary_button)
         auxiliary_menu.addActions(tuple(self.auxiliary_actions.values()))
         self.auxiliary_button.setMenu(auxiliary_menu)
+        header_separator = QtWidgets.QFrame()
+        header_separator.setObjectName("headerSeparator")
+        header_separator.setFixedWidth(1)
         header_layout.addWidget(self.source_label, 0, 0)
         header_layout.addWidget(self.review_badge, 0, 1, 2, 1, QtCore.Qt.AlignmentFlag.AlignRight)
         header_layout.addWidget(self.target_label, 1, 0)
-        header_layout.addWidget(self.raw_checkbox, 0, 2, 2, 1)
-        header_layout.addWidget(self.auxiliary_button, 0, 3, 2, 1)
+        header_layout.addWidget(header_separator, 0, 2, 2, 1)
+        header_layout.addWidget(self.raw_checkbox, 0, 3, 2, 1)
+        header_layout.addWidget(self.auxiliary_button, 0, 4, 2, 1)
         header_layout.setColumnStretch(0, 1)
         root_layout.addWidget(header)
 
@@ -233,76 +252,150 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.left_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         self.main_splitter.setChildrenCollapsible(False)
         self.left_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setHandleWidth(5)
+        self.left_splitter.setHandleWidth(5)
         self.graphics = pg.GraphicsLayoutWidget()
+        self.graphics.setBackground("#f8faf9")
         self.overview_plot = self.graphics.addPlot(row=0, col=0)
         self.annotation_plot = self.graphics.addPlot(row=1, col=0)
         self.leg_plot = self.graphics.addPlot(row=2, col=0)
         self.pitch_plot = self.graphics.addPlot(row=3, col=0)
         self.motion_plot = self.graphics.addPlot(row=4, col=0)
         self.state_plot = self.graphics.addPlot(row=5, col=0)
-        self.graphics.ci.layout.setRowFixedHeight(1, 84)
-        self.graphics.ci.layout.setRowFixedHeight(5, 92)
+        self.graphics.ci.layout.setRowFixedHeight(1, 76)
+        self.graphics.ci.layout.setRowFixedHeight(5, 84)
         self._auxiliary_plots = {
-            "overview": (self.overview_plot, 0, 38),
-            "pitch": (self.pitch_plot, 3, 48),
-            "motion": (self.motion_plot, 4, 48),
+            "overview": (self.overview_plot, 0, 34),
+            "pitch": (self.pitch_plot, 3, 42),
+            "motion": (self.motion_plot, 4, 42),
         }
         self._configure_plots()
         self._apply_auxiliary_visibility()
         self.left_splitter.addWidget(self.graphics)
 
         self.event_table = QtWidgets.QTableWidget(0, 6)
+        self.event_table.setObjectName("eventTable")
         self.event_table.setHorizontalHeaderLabels(("时刻", "类型", "活动", "地形", "来源", "备注"))
         self.event_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.event_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.event_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.event_table.setAlternatingRowColors(True)
         self.event_table.setShowGrid(False)
+        self.event_table.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.event_table.setWordWrap(False)
+        self.event_table.setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
         self.event_table.verticalHeader().hide()
+        self.event_table.verticalHeader().setDefaultSectionSize(30)
+        self.event_table.horizontalHeader().setMinimumHeight(32)
         self.event_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.event_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.event_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.event_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.event_table.horizontalHeader().setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.event_table.horizontalHeader().setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.left_splitter.addWidget(self.event_table)
-        self.left_splitter.setSizes([720, 120])
+        event_panel = QtWidgets.QFrame()
+        event_panel.setObjectName("eventPanel")
+        event_layout = QtWidgets.QVBoxLayout(event_panel)
+        event_layout.setContentsMargins(0, 0, 0, 0)
+        event_layout.setSpacing(0)
+        event_header = QtWidgets.QWidget()
+        event_header.setObjectName("eventHeader")
+        event_header_layout = QtWidgets.QHBoxLayout(event_header)
+        event_header_layout.setContentsMargins(14, 7, 12, 7)
+        event_header_layout.setSpacing(8)
+        event_title = QtWidgets.QLabel("事件")
+        event_title.setObjectName("paneTitle")
+        self.event_count_label = QtWidgets.QLabel("0 项")
+        self.event_count_label.setObjectName("countLabel")
+        event_header_layout.addWidget(event_title)
+        event_header_layout.addStretch(1)
+        event_header_layout.addWidget(self.event_count_label)
+        event_layout.addWidget(event_header)
+        event_layout.addWidget(self.event_table, 1)
+        self.left_splitter.addWidget(event_panel)
+        self.left_splitter.setSizes([660, 170])
         self.main_splitter.addWidget(self.left_splitter)
         self.main_splitter.addWidget(self._build_inspector())
-        self.main_splitter.setSizes([1080, 340])
+        self.main_splitter.setSizes([1040, 360])
         self.main_splitter.setStretchFactor(0, 1)
-        root_layout.addWidget(self.main_splitter, 1)
+        self.workspace_stack = QtWidgets.QStackedWidget()
+        self.workspace_stack.setObjectName("workspaceStack")
+        self.empty_state = self._build_empty_state()
+        self.workspace_stack.addWidget(self.empty_state)
+        self.workspace_stack.addWidget(self.main_splitter)
+        self.workspace_stack.setCurrentWidget(self.empty_state)
+        root_layout.addWidget(self.workspace_stack, 1)
         self.setCentralWidget(root)
 
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 0)
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(6)
         self.progress.setMaximumWidth(150)
         self.progress.hide()
         self.statusBar().addPermanentWidget(self.progress)
+
+    def _build_empty_state(self) -> QtWidgets.QWidget:
+        empty = QtWidgets.QWidget()
+        empty.setObjectName("emptyState")
+        layout = QtWidgets.QVBoxLayout(empty)
+        layout.setContentsMargins(32, 32, 32, 48)
+        layout.setSpacing(10)
+        layout.addStretch(3)
+        icon_label = QtWidgets.QLabel()
+        icon_label.setObjectName("emptyIcon")
+        icon_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        icon_label.setPixmap(self.open_action.icon().pixmap(QtCore.QSize(42, 42)))
+        title = QtWidgets.QLabel("尚未载入试次")
+        title.setObjectName("emptyTitle")
+        title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        subtitle = QtWidgets.QLabel("打开原始 CSV 开始标注")
+        subtitle.setObjectName("emptySubtitle")
+        subtitle.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.empty_open_button = QtWidgets.QPushButton(self.open_action.icon(), "打开试次")
+        self.empty_open_button.setObjectName("primaryButton")
+        self.empty_open_button.setMinimumWidth(132)
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.addStretch(1)
+        button_row.addWidget(self.empty_open_button)
+        button_row.addStretch(1)
+        layout.addWidget(icon_label)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addSpacing(8)
+        layout.addLayout(button_row)
+        layout.addStretch(4)
+        return empty
 
     def _build_inspector(self) -> QtWidgets.QWidget:
         content = QtWidgets.QWidget()
         content.setObjectName("inspector")
         layout = QtWidgets.QVBoxLayout(content)
-        layout.setContentsMargins(10, 10, 10, 12)
-        layout.setSpacing(9)
+        layout.setContentsMargins(16, 12, 16, 18)
+        layout.setSpacing(10)
 
-        selected = QtWidgets.QGroupBox("所选事件")
+        selected = QtWidgets.QGroupBox("事件详情")
+        selected.setObjectName("firstSection")
         selected_form = QtWidgets.QFormLayout(selected)
+        self._configure_form(selected_form)
         self.timestamp_label = QtWidgets.QLabel("-")
+        self.timestamp_label.setObjectName("timestampValue")
         self.timestamp_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         self.component_combo = QtWidgets.QComboBox()
         time_row = QtWidgets.QWidget()
         time_layout = QtWidgets.QHBoxLayout(time_row)
         time_layout.setContentsMargins(0, 0, 0, 0)
         self.previous_sample_button = QtWidgets.QToolButton()
+        self.previous_sample_button.setObjectName("stepButton")
         self.previous_sample_button.setIcon(self._icon(QtWidgets.QStyle.StandardPixmap.SP_ArrowLeft))
         self.previous_sample_button.setToolTip("前一个真实采样点")
         self.time_spin = QtWidgets.QDoubleSpinBox()
+        self.time_spin.setObjectName("timeSpin")
         self.time_spin.setDecimals(6)
         self.time_spin.setKeyboardTracking(False)
         self.time_spin.setSuffix(" s")
         self.next_sample_button = QtWidgets.QToolButton()
+        self.next_sample_button.setObjectName("stepButton")
         self.next_sample_button.setIcon(self._icon(QtWidgets.QStyle.StandardPixmap.SP_ArrowRight))
         self.next_sample_button.setToolTip("后一个真实采样点")
         time_layout.addWidget(self.previous_sample_button)
@@ -325,9 +418,11 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         selected_form.addRow(self.delete_button)
         layout.addWidget(selected)
 
-        create = QtWidgets.QGroupBox("新建")
+        create = QtWidgets.QGroupBox("添加标注")
         create_form = QtWidgets.QFormLayout(create)
+        self._configure_form(create_form)
         self.cursor_label = QtWidgets.QLabel("-")
+        self.cursor_label.setObjectName("cursorValue")
         activity_row = QtWidgets.QWidget()
         activity_layout = QtWidgets.QHBoxLayout(activity_row)
         activity_layout.setContentsMargins(0, 0, 0, 0)
@@ -367,6 +462,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.interval_end_button = QtWidgets.QPushButton("设为结束")
         self.interval_add_button = QtWidgets.QPushButton("添加区间")
         self.interval_range_label = QtWidgets.QLabel("未设置")
+        self.interval_range_label.setObjectName("intervalValue")
         interval_layout.addWidget(self.interval_track_combo, 0, 0)
         interval_layout.addWidget(self.interval_value_combo, 0, 1, 1, 2)
         interval_layout.addWidget(self.interval_start_button, 1, 0)
@@ -378,8 +474,12 @@ class AnnotationEditor(QtWidgets.QMainWindow):
 
         qa = QtWidgets.QGroupBox("QA 复核")
         qa_layout = QtWidgets.QVBoxLayout(qa)
+        qa_layout.setContentsMargins(0, 16, 0, 0)
+        qa_layout.setSpacing(8)
         self.qa_list = QtWidgets.QListWidget()
-        self.qa_list.setMaximumHeight(130)
+        self.qa_list.setObjectName("qaList")
+        self.qa_list.setMinimumHeight(104)
+        self.qa_list.setMaximumHeight(148)
         qa_buttons = QtWidgets.QHBoxLayout()
         self.qa_fixed_button = QtWidgets.QPushButton("标记已修正")
         self.qa_accept_button = QtWidgets.QPushButton("确认无需修改")
@@ -391,11 +491,13 @@ class AnnotationEditor(QtWidgets.QMainWindow):
 
         review = QtWidgets.QGroupBox("正式复核")
         review_form = QtWidgets.QFormLayout(review)
+        self._configure_form(review_form)
         self.annotator_edit = QtWidgets.QLineEdit(str(self.settings.value("annotator_id", "")))
         self.review_checkbox = QtWidgets.QCheckBox("我已检查完整时间线")
         self.validation_label = QtWidgets.QLabel("-")
         self.validation_label.setWordWrap(True)
         self.validation_label.setObjectName("validation")
+        self.validation_label.setProperty("status", "neutral")
         review_form.addRow("标注员 ID", self.annotator_edit)
         review_form.addRow(self.review_checkbox)
         review_form.addRow(self.validation_label)
@@ -403,10 +505,29 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         layout.addStretch(1)
 
         scroll = QtWidgets.QScrollArea()
+        scroll.setObjectName("inspectorScroll")
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(content)
-        scroll.setMinimumWidth(320)
+        scroll.setMinimumWidth(344)
         return scroll
+
+    @staticmethod
+    def _configure_form(form: QtWidgets.QFormLayout) -> None:
+        form.setContentsMargins(0, 16, 0, 0)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
+        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+
+    @staticmethod
+    def _set_dynamic_property(widget: QtWidgets.QWidget, name: str, value: str) -> None:
+        if widget.property(name) == value:
+            return
+        widget.setProperty(name, value)
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+        widget.update()
 
     @staticmethod
     def _label_combo(labels: dict[str, str]) -> QtWidgets.QComboBox:
@@ -430,7 +551,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         for plot in plots:
             plot.setMenuEnabled(False)
             plot.hideButtons()
-            plot.showGrid(x=False, y=True, alpha=0.22)
+            plot.showGrid(x=False, y=True, alpha=0.15)
             plot.setClipToView(True)
             plot.setDownsampling(auto=True, mode="peak")
         self.leg_plot.setLabel("left", "腿部位置")
@@ -446,14 +567,14 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             plot.getAxis("left").setWidth(62)
             for axis_name in ("left", "bottom"):
                 axis = plot.getAxis(axis_name)
-                axis.setPen(pg.mkPen("#aeb4b7", width=0.8))
-                axis.setTextPen(pg.mkPen("#3e4548"))
+                axis.setPen(pg.mkPen("#b9c4be", width=0.8))
+                axis.setTextPen(pg.mkPen("#59655f"))
                 axis.setTickFont(QtGui.QFont("Noto Sans CJK SC", 8))
         for plot in (self.leg_plot, self.pitch_plot, self.motion_plot):
             plot.hideAxis("bottom")
-        legend = self.leg_plot.addLegend(offset=(10, 8), labelTextColor="#303638")
-        legend.setBrush(pg.mkBrush(255, 255, 255, 215))
-        legend.setPen(pg.mkPen("#c9cdcf", width=0.7))
+        legend = self.leg_plot.addLegend(offset=(10, 8), labelTextColor="#3a4640")
+        legend.setBrush(pg.mkBrush(248, 250, 249, 225))
+        legend.setPen(pg.mkPen("#c9d3ce", width=0.7))
         self.leg_plot.sigXRangeChanged.connect(self._detail_range_changed)
         self.graphics.scene().sigMouseClicked.connect(self._plot_clicked)
 
@@ -472,42 +593,195 @@ class AnnotationEditor(QtWidgets.QMainWindow):
     def _apply_style(self) -> None:
         self.setStyleSheet(
             """
-            QMainWindow, QWidget { color: #24292c; font-family: "Noto Sans CJK SC", sans-serif; font-size: 12px; }
-            QMainWindow, QWidget#centralRoot { background: #f2f3f3; }
-            QFrame#header { background: #ffffff; border-bottom: 1px solid #c8ccce; }
-            QLabel#sourceLabel { font-size: 15px; font-weight: 600; color: #1f2528; }
-            QLabel#reviewBadge { padding: 3px 8px; border: 1px solid #8d969a; border-radius: 3px; background: #f4f5f5; }
-            QWidget#inspector, QScrollArea, QScrollArea > QWidget > QWidget { background: #ffffff; }
-            QScrollArea { border: 0; border-left: 1px solid #c8ccce; }
-            QGroupBox { background: #ffffff; border: 0; border-top: 1px solid #d7d9da; margin-top: 13px; padding-top: 10px; font-weight: 600; }
-            QGroupBox::title { subcontrol-origin: margin; left: 0; padding: 0 5px 0 0; background: #ffffff; }
-            QLineEdit, QComboBox, QDoubleSpinBox, QListWidget, QTableWidget { background: #ffffff; border: 1px solid #aeb4b7; border-radius: 2px; selection-background-color: #356f72; selection-color: #ffffff; }
-            QLineEdit, QComboBox, QDoubleSpinBox { min-height: 25px; padding: 1px 5px; }
-            QComboBox::drop-down { border: 0; width: 22px; }
-            QListWidget, QTableWidget { alternate-background-color: #f6f7f7; outline: 0; }
-            QPushButton, QToolButton { background: #ffffff; border: 1px solid #969da0; border-radius: 3px; min-height: 25px; padding: 2px 7px; }
-            QPushButton:hover, QToolButton:hover { background: #edf4f2; border-color: #4f7774; }
-            QPushButton:pressed, QToolButton:pressed { background: #dde9e6; }
-            QPushButton:disabled, QToolButton:disabled { color: #9ca1a3; background: #f0f1f1; border-color: #d4d6d7; }
-            QPushButton#dangerButton { color: #a3312b; border-color: #c69a96; }
-            QPushButton#dangerButton:hover { background: #fbefee; border-color: #a3312b; }
-            QLabel#evidence { color: #505b60; font-size: 11px; }
-            QLabel#validation { color: #a3312b; }
-            QHeaderView::section { background: #e9ebeb; padding: 5px; border: 0; border-right: 1px solid #c8ccce; border-bottom: 1px solid #c8ccce; font-weight: 600; }
-            QToolBar, QMenuBar, QStatusBar { background: #f7f8f8; }
-            QToolBar { border-bottom: 1px solid #c8ccce; spacing: 2px; padding: 2px 5px; }
-            QMenuBar { border-bottom: 1px solid #d5d8d9; }
-            QMenu { background: #ffffff; border: 1px solid #aeb4b7; padding: 3px; }
-            QMenu::item { padding: 5px 24px 5px 8px; }
-            QMenu::item:selected { background: #e6efed; color: #1f2528; }
-            QSplitter::handle { background: #c8ccce; }
-            QSplitter::handle:horizontal { width: 1px; }
-            QSplitter::handle:vertical { height: 1px; }
+            QMainWindow, QDialog, QWidget {
+                color: #29332f;
+                font-family: "Noto Sans CJK SC", sans-serif;
+                font-size: 12px;
+            }
+            QMainWindow, QWidget#centralRoot, QStackedWidget#workspaceStack { background: #eef2f0; }
+            QFrame#header { background: #f8faf9; border-bottom: 1px solid #cfd8d3; }
+            QFrame#headerSeparator { background: #d9e0dc; border: 0; }
+            QLabel#sourceLabel { color: #17231e; font-size: 16px; font-weight: 600; }
+            QLabel#targetLabel { color: #68736e; font-size: 11px; }
+            QLabel#reviewBadge {
+                min-width: 72px;
+                padding: 4px 9px;
+                border: 1px solid #c4cdc8;
+                border-radius: 4px;
+                background: #f0f3f1;
+                color: #5d6863;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QLabel#reviewBadge[status="error"] { color: #963e37; background: #fff3f0; border-color: #dfb4ae; }
+            QLabel#reviewBadge[status="warning"] { color: #855b20; background: #fff8e8; border-color: #e5cd9f; }
+            QLabel#reviewBadge[status="neutral"] { color: #56625d; background: #f0f3f1; border-color: #c4cdc8; }
+            QLabel#reviewBadge[status="ready"] { color: #225f56; background: #eaf5f1; border-color: #a9cec3; }
+            QLabel#reviewBadge[status="saved"] { color: #315f69; background: #ebf3f5; border-color: #abc8ce; }
+
+            QWidget#emptyState { background: #eef2f0; }
+            QLabel#emptyTitle { color: #17231e; font-size: 22px; font-weight: 600; }
+            QLabel#emptySubtitle { color: #6a756f; font-size: 12px; }
+
+            QFrame#eventPanel, QWidget#eventHeader { background: #f8faf9; }
+            QWidget#eventHeader { border-top: 1px solid #d5ddd8; border-bottom: 1px solid #d5ddd8; }
+            QLabel#paneTitle { color: #24302b; font-size: 12px; font-weight: 600; }
+            QLabel#countLabel { color: #7a8580; font-size: 11px; }
+
+            QWidget#inspector,
+            QScrollArea#inspectorScroll,
+            QScrollArea#inspectorScroll > QWidget > QWidget { background: #f8faf9; }
+            QScrollArea#inspectorScroll { border: 0; border-left: 1px solid #cfd8d3; }
+            QGroupBox {
+                background: transparent;
+                border: 0;
+                border-top: 1px solid #dbe2de;
+                margin-top: 18px;
+                padding-top: 14px;
+                color: #26322d;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QGroupBox#firstSection { border-top: 0; margin-top: 2px; padding-top: 8px; }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 0;
+                padding: 0 8px 0 0;
+                background: #f8faf9;
+            }
+
+            QLineEdit, QComboBox, QDoubleSpinBox, QListWidget, QTableWidget {
+                background: #ffffff;
+                border: 1px solid #b8c3bd;
+                border-radius: 4px;
+                selection-background-color: #2f756a;
+                selection-color: #ffffff;
+            }
+            QLineEdit, QComboBox, QDoubleSpinBox { min-height: 28px; padding: 1px 7px; }
+            QComboBox::drop-down { border: 0; width: 24px; }
+            QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus, QListWidget:focus, QTableWidget:focus {
+                border: 2px solid #2f756a;
+            }
+            QLineEdit:disabled, QComboBox:disabled, QDoubleSpinBox:disabled {
+                color: #98a19d;
+                background: #edf1ef;
+                border-color: #d6deda;
+            }
+            QListWidget { alternate-background-color: #f3f6f4; outline: 0; }
+            QListWidget::item { padding: 5px 7px; }
+            QListWidget::item:selected { background: #dcece7; color: #1e4f48; }
+
+            QPushButton, QToolButton {
+                min-height: 29px;
+                padding: 2px 8px;
+                background: #ffffff;
+                border: 1px solid #aebbb4;
+                border-radius: 4px;
+                color: #2b3732;
+                font-weight: 500;
+            }
+            QPushButton:hover, QToolButton:hover { background: #edf5f2; border-color: #5f8d82; }
+            QPushButton:pressed, QToolButton:pressed { background: #dcebe6; border-color: #2f756a; }
+            QPushButton:focus, QToolButton:focus { border: 2px solid #2f756a; }
+            QPushButton:disabled, QToolButton:disabled {
+                color: #9ca5a0;
+                background: #edf1ef;
+                border-color: #d7dfdb;
+            }
+            QPushButton#primaryButton, QToolButton#primaryToolButton {
+                color: #ffffff;
+                background: #286c61;
+                border-color: #286c61;
+                font-weight: 600;
+            }
+            QPushButton#primaryButton:hover, QToolButton#primaryToolButton:hover {
+                background: #215f56;
+                border-color: #215f56;
+            }
+            QPushButton#primaryButton:pressed, QToolButton#primaryToolButton:pressed {
+                background: #194d46;
+                border-color: #194d46;
+            }
+            QPushButton#primaryButton:disabled, QToolButton#primaryToolButton:disabled {
+                color: #90aaa3;
+                background: #dce5e1;
+                border-color: #dce5e1;
+            }
+            QToolButton#stepButton { min-width: 28px; max-width: 28px; padding: 0; }
+            QPushButton#dangerButton { color: #99423b; background: transparent; border-color: #d7aaa5; }
+            QPushButton#dangerButton:hover { background: #fff1ef; border-color: #b45a52; }
+            QCheckBox { spacing: 7px; }
+            QCheckBox:focus { color: #1f665c; }
+
+            QLabel#timestampValue, QLabel#cursorValue, QLabel#intervalValue, QDoubleSpinBox#timeSpin {
+                font-family: "Noto Sans Mono CJK SC", monospace;
+                font-size: 11px;
+            }
+            QLabel#evidence { color: #68736e; font-size: 11px; font-weight: 400; }
+            QLabel#validation { color: #5c6862; font-size: 11px; font-weight: 400; }
+            QLabel#validation[status="error"] { color: #963e37; }
+            QLabel#validation[status="neutral"] { color: #5c6862; }
+            QLabel#validation[status="success"] { color: #24665b; }
+
+            QTableWidget#eventTable {
+                background: #f8faf9;
+                alternate-background-color: #f1f5f3;
+                border: 0;
+                border-radius: 0;
+                outline: 0;
+            }
+            QTableWidget#eventTable::item { padding: 4px 7px; border: 0; }
+            QTableWidget#eventTable::item:selected { background: #2f756a; color: #ffffff; }
+            QHeaderView::section {
+                background: #e8eeeb;
+                color: #4f5c56;
+                padding: 6px 7px;
+                border: 0;
+                border-right: 1px solid #d5ddd8;
+                border-bottom: 1px solid #cfd8d3;
+                font-size: 11px;
+                font-weight: 600;
+            }
+
+            QToolBar#mainToolbar { background: #f8faf9; border-bottom: 1px solid #cfd8d3; spacing: 2px; padding: 4px 7px; }
+            QToolBar#mainToolbar QToolButton { min-height: 28px; padding: 2px 8px; border-color: transparent; background: transparent; }
+            QToolBar#mainToolbar QToolButton:hover { background: #eaf1ee; border-color: #c3d1ca; }
+            QToolBar#mainToolbar QToolButton:pressed { background: #dce8e3; border-color: #94afa5; }
+            QToolBar#mainToolbar QToolButton#primaryToolButton { color: #ffffff; background: #286c61; border-color: #286c61; }
+            QToolBar#mainToolbar QToolButton#primaryToolButton:hover { background: #215f56; border-color: #215f56; }
+            QToolBar#mainToolbar QToolButton#primaryToolButton:disabled { color: #90aaa3; background: #dce5e1; border-color: #dce5e1; }
+            QToolBar#mainToolbar QToolButton#historyToolButton { padding: 0; }
+            QToolBar::separator { width: 1px; margin: 6px 7px; background: #d8dfdb; }
+            QMenuBar { background: #f8faf9; border-bottom: 1px solid #d9e0dc; }
+            QMenuBar::item { padding: 4px 8px; background: transparent; }
+            QMenuBar::item:selected { background: #e9f0ed; color: #1d4e47; }
+            QMenu { background: #ffffff; border: 1px solid #b8c3bd; padding: 4px; }
+            QMenu::item { padding: 6px 26px 6px 9px; border-radius: 3px; }
+            QMenu::item:selected { background: #e4f0ec; color: #1d4e47; }
+            QMenu::separator { height: 1px; margin: 4px 6px; background: #dce2df; }
+
+            QStatusBar { background: #edf1ef; color: #68736e; border-top: 1px solid #d5ddd8; }
+            QProgressBar { background: #d5dfda; border: 0; border-radius: 3px; }
+            QProgressBar::chunk { background: #2f756a; border-radius: 3px; }
+            QSplitter::handle { background: #dbe2de; }
+            QSplitter::handle:hover { background: #a8bdb4; }
+            QSplitter::handle:horizontal { width: 5px; }
+            QSplitter::handle:vertical { height: 5px; }
+
+            QScrollBar:vertical { width: 10px; margin: 0; background: #edf1ef; }
+            QScrollBar::handle:vertical { min-height: 28px; margin: 2px; background: #b9c5bf; border-radius: 3px; }
+            QScrollBar::handle:vertical:hover { background: #8fa69c; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar:horizontal { height: 10px; margin: 0; background: #edf1ef; }
+            QScrollBar::handle:horizontal { min-width: 28px; margin: 2px; background: #b9c5bf; border-radius: 3px; }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+            QToolTip { color: #f7faf8; background: #26342e; border: 1px solid #52645c; padding: 5px 7px; }
             """
         )
 
     def _connect_actions(self) -> None:
         self.open_action.triggered.connect(self.request_open)
+        self.empty_open_button.clicked.connect(self.request_open)
         self.target_action.triggered.connect(self.choose_target)
         self.save_action.triggered.connect(self.save_formal)
         self.export_action.triggered.connect(self.export_png)
@@ -543,12 +817,16 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         for action in self.session_actions:
             action.setEnabled(enabled)
         self.raw_checkbox.setEnabled(enabled)
+        self.auxiliary_button.setEnabled(self.trial is not None and not self._busy)
         self.event_table.setEnabled(enabled)
+        self.workspace_stack.setCurrentWidget(self.main_splitter if self.trial is not None else self.empty_state)
 
     def _set_busy(self, busy: bool, message: str = "") -> None:
         self._busy = busy
         self.progress.setVisible(busy)
         self.open_action.setEnabled(not busy)
+        self.empty_open_button.setEnabled(not busy)
+        self.auxiliary_button.setEnabled(self.trial is not None and not busy)
         if busy:
             for action in self.session_actions:
                 action.setEnabled(False)
@@ -755,7 +1033,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self._raw_curves = [
             self.leg_plot.plot(x, trial.channels["display/left_raw"], pen=pg.mkPen(LEFT_COLOR, width=0.6, style=QtCore.Qt.PenStyle.DashLine), **plot_options),
             self.leg_plot.plot(x, trial.channels["display/right_raw"], pen=pg.mkPen(RIGHT_COLOR, width=0.6, style=QtCore.Qt.PenStyle.DashLine), **plot_options),
-            self.pitch_plot.plot(x, trial.channels["display/pitch_raw"], pen=pg.mkPen("#9E9E9E", width=0.6, style=QtCore.Qt.PenStyle.DashLine), **plot_options),
+            self.pitch_plot.plot(x, trial.channels["display/pitch_raw"], pen=pg.mkPen("#87938d", width=0.6, style=QtCore.Qt.PenStyle.DashLine), **plot_options),
         ]
         for plot in (self.overview_plot, self.leg_plot, self.pitch_plot, self.motion_plot):
             for curve in plot.listDataItems():
@@ -766,8 +1044,8 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             values=(0.0, initial_end),
             bounds=(0.0, trial.duration),
             movable=True,
-            brush=pg.mkBrush(0, 121, 107, 35),
-            pen=pg.mkPen("#00796B", width=1),
+            brush=pg.mkBrush(47, 117, 106, 34),
+            pen=pg.mkPen("#2f756a", width=1),
         )
         self.overview_plot.addItem(self.overview_region)
         self.overview_region.sigRegionChanged.connect(self._overview_region_changed)
@@ -778,7 +1056,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
                 region = pg.LinearRegionItem(
                     values=(gap.start, gap.end),
                     movable=False,
-                    brush=pg.mkBrush(96, 125, 139, 55),
+                    brush=pg.mkBrush(111, 128, 120, 46),
                     pen=pg.mkPen(None),
                 )
                 region.setZValue(-5)
@@ -839,13 +1117,13 @@ class AnnotationEditor(QtWidgets.QMainWindow):
                 ConfirmationKind.STAIR_SECOND_STEP.value,
                 ConfirmationKind.TRIAL_END.value,
             }
-            color = "#a3312b" if selected else "#397779" if confirmation else "#666c6f"
+            color = "#1f6f63" if selected else "#4f7881" if confirmation else "#69746f"
             line = pg.InfiniteLine(
                 pos=seconds,
                 angle=90,
                 movable=False,
                 pen=pg.mkPen(color, width=1.6 if selected else 0.8, style=QtCore.Qt.PenStyle.DashLine if confirmation else QtCore.Qt.PenStyle.SolidLine),
-                hoverPen=pg.mkPen("#a3312b", width=2),
+                hoverPen=pg.mkPen("#1f6f63", width=2),
             )
             line.setToolTip(self._event_tooltip(event))
             line.setZValue(15)
@@ -868,12 +1146,13 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             label = EventLabel(
                 component_id,
                 text=self._event_short_label(event),
-                color="#22282b",
+                color="#25312c",
                 anchor=anchor,
                 border=pg.mkPen(color, width=1 if selected else 0.7),
-                fill=pg.mkBrush("#fffdf9" if selected else "#ffffff"),
+                fill=pg.mkBrush("#edf7f3" if selected else "#ffffff"),
                 ensureInBounds=False,
             )
+            label.setFont(QtGui.QFont("Noto Sans CJK SC", 8, QtGui.QFont.Weight.Medium))
             label.setToolTip(self._event_tooltip(event))
             label.setPos(seconds, lane_y)
             label.clicked.connect(self._annotation_clicked)
@@ -892,7 +1171,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         trial, document = self.trial, self.document
         self._populate_main_annotations()
         duration = max(trial.duration, 1e-9)
-        terrain_colors = {"LEVEL": "#78909C", "ASCENT": "#F57C00", "DESCENT": "#1976D2"}
+        terrain_colors = {"LEVEL": "#83918b", "ASCENT": "#bd7a3b", "DESCENT": "#527b94"}
         for start_index, end_index, activity, terrain in document.intervals():
             start, end = float(trial.seconds[start_index]), float(trial.seconds[end_index])
             width = max(end - start, duration / max(len(trial.seconds), 1))
@@ -906,7 +1185,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
                 self.state_plot.addItem(rectangle)
                 self._state_items.append(rectangle)
             if end - start > duration * 0.075:
-                activity_text = pg.TextItem(ACTIVITY_NAMES.get(activity, activity), color="#263238", anchor=(0, 0.5))
+                activity_text = pg.TextItem(ACTIVITY_NAMES.get(activity, activity), color="#34413b", anchor=(0, 0.5))
                 activity_text.setPos(start + min(0.25, (end - start) * 0.04), 1.45)
                 activity_text.setZValue(-2)
                 self.state_plot.addItem(activity_text)
@@ -918,14 +1197,14 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             Provenance.IMPORTED_UNKNOWN: QtCore.Qt.PenStyle.DashDotLine,
         }
         for boundary in document.boundaries:
-            color = "#6A1B9A" if boundary.track is Track.ACTIVITY else "#00695C"
+            color = "#725f87" if boundary.track is Track.ACTIVITY else "#2f756a"
             selected = boundary.id == self.selected_component_id
             line = pg.InfiniteLine(
                 pos=float(trial.seconds[boundary.sample_index]),
                 angle=90,
                 movable=boundary.sample_index != 0,
                 pen=pg.mkPen(color, width=3 if selected else 2, style=provenance_style[boundary.provenance]),
-                hoverPen=pg.mkPen("#C62828", width=4),
+                hoverPen=pg.mkPen("#a84d45", width=4),
                 span=(0.35, 0.64) if boundary.track is Track.ACTIVITY else (0.02, 0.30),
             )
             line.setZValue(20)
@@ -939,8 +1218,8 @@ class AnnotationEditor(QtWidgets.QMainWindow):
                 pos=float(trial.seconds[confirmation.sample_index]),
                 angle=90,
                 movable=True,
-                pen=pg.mkPen("#00838F", width=3 if selected else 2, style=QtCore.Qt.PenStyle.DashLine),
-                hoverPen=pg.mkPen("#C62828", width=4),
+                pen=pg.mkPen("#4f7881", width=3 if selected else 2, style=QtCore.Qt.PenStyle.DashLine),
+                hoverPen=pg.mkPen("#a84d45", width=4),
                 span=(0.70, 0.98),
             )
             line.setZValue(20)
@@ -954,8 +1233,8 @@ class AnnotationEditor(QtWidgets.QMainWindow):
                 angle=90,
                 movable=True,
                 bounds=(float(trial.seconds[0]), float(trial.seconds[-1])),
-                pen=pg.mkPen("#303638", width=1.2),
-                hoverPen=pg.mkPen("#a3312b", width=2.2),
+                pen=pg.mkPen("#34413b", width=1.2),
+                hoverPen=pg.mkPen("#1f6f63", width=2.2),
             )
             cursor.setZValue(30)
             cursor.sigPositionChanged.connect(partial(self._cursor_dragged, cursor))
@@ -1020,6 +1299,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             self._set_cursor(self.cursor_index)
             if self.document is None:
                 self.event_table.setRowCount(0)
+                self.event_count_label.setText("0 项")
                 return
             events = self.document.composed_events()
             if select_component:
@@ -1044,7 +1324,10 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         assert self.trial is not None
         self.event_table.blockSignals(True)
         self.event_table.setRowCount(len(events))
+        self.event_count_label.setText(f"{len(events)} 项")
         selected_row = -1
+        time_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
+        time_font.setPointSize(9)
         for row, event in enumerate(events):
             values = (
                 self.trial.timestamp(event.sample_index),
@@ -1058,6 +1341,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
                 item = QtWidgets.QTableWidgetItem(value)
                 if column == 0:
                     item.setData(QtCore.Qt.ItemDataRole.UserRole, event.id)
+                    item.setFont(time_font)
                 self.event_table.setItem(row, column, item)
             if event.id == self.selected_event_id:
                 selected_row = row
@@ -1325,9 +1609,9 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             item = QtWidgets.QListWidgetItem(f"{prefix} {issue.message}")
             item.setData(QtCore.Qt.ItemDataRole.UserRole, issue.id)
             if issue.resolved:
-                item.setForeground(QtGui.QColor("#2E7D32"))
+                item.setForeground(QtGui.QColor("#28695f"))
             elif issue.severity is Severity.BLOCKING:
-                item.setForeground(QtGui.QColor("#B71C1C"))
+                item.setForeground(QtGui.QColor("#963e37"))
             self.qa_list.addItem(item)
             if issue.id == current:
                 self.qa_list.setCurrentItem(item)
@@ -1367,16 +1651,17 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.review_checkbox.blockSignals(False)
         if errors:
             self.validation_label.setText("；".join(errors))
-            self.validation_label.setStyleSheet("color: #b71c1c;")
+            status = "error"
         elif unresolved:
             self.validation_label.setText(f"尚有 {len(unresolved)} 个 QA 复核项未闭环")
-            self.validation_label.setStyleSheet("color: #b71c1c;")
+            status = "error"
         elif self.document.reviewed is None:
             self.validation_label.setText("等待完整时间线复核声明")
-            self.validation_label.setStyleSheet("color: #455a64;")
+            status = "neutral"
         else:
             self.validation_label.setText("结构与复核条件已满足")
-            self.validation_label.setStyleSheet("color: #2e7d32;")
+            status = "success"
+        self._set_dynamic_property(self.validation_label, "status", status)
 
     def _review_toggled(self, checked: bool) -> None:
         if self._refreshing or self.document is None:
@@ -1405,17 +1690,17 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         errors = self.document.structural_errors()
         unresolved = sum(not issue.resolved for issue in self.document.issues)
         if errors:
-            text, color = f"结构错误 {len(errors)}", "#B71C1C"
+            text, status = f"结构错误 {len(errors)}", "error"
         elif unresolved:
-            text, color = f"待复核 {unresolved}", "#E65100"
+            text, status = f"待复核 {unresolved}", "warning"
         elif self.document.reviewed is None:
-            text, color = "待完整复核", "#455A64"
+            text, status = "待完整复核", "neutral"
         elif self.document.dirty:
-            text, color = "可正式保存", "#2E7D32"
+            text, status = "可正式保存", "ready"
         else:
-            text, color = "已正式保存", "#1565C0"
+            text, status = "已正式保存", "saved"
         self.review_badge.setText(text)
-        self.review_badge.setStyleSheet(f"color: {color}; border-color: {color};")
+        self._set_dynamic_property(self.review_badge, "status", status)
         self.save_action.setEnabled(self.repository is not None and self.document.ready_to_save)
         self.undo_action.setEnabled(bool(self.document._undo))
         self.redo_action.setEnabled(bool(self.document._redo))
@@ -1523,7 +1808,9 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.source_label.setText("未打开试次")
         self.target_label.setText("标注文件：未选择")
         self.review_badge.setText("未载入")
+        self._set_dynamic_property(self.review_badge, "status", "empty")
         self.event_table.setRowCount(0)
+        self.event_count_label.setText("0 项")
         self._set_session_enabled(False)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
