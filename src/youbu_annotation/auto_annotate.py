@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline annotation for protocol-compatible T01-T04 gait trials.
+"""Offline annotation for protocol-compatible gait trials.
 
 边界一律锚定在信号证据上：脚步 onset、自校准运动阈值沿、俯仰带迁移。
 试次协议只用于地形候选顺序筛选与 QA 合理性检查，不参与活动标签分配，
@@ -51,7 +51,7 @@ OUTPUT_FIELDS = (
     "terrain_truth",
     "notes",
 )
-FILE_RE = re.compile(r"^(P\d+_S\d+)_(T0[1-4])(?:_|\.).*\.csv$", re.I)
+FILE_RE = re.compile(r"^(P\d+_S\d+)_(T\d+)(?:_|\.).*\.csv$", re.I)
 
 # ---- 检测常量。数值依据 7.21 开发集特征研究，推导过程见 docs/adr/0003 ----
 DATA_GAP_S = 1.0                # 原始采样间隔超过此值视为数据断档（QA 标记）
@@ -1446,7 +1446,7 @@ def validate(events: list[Event], reference_path: Path, subject: str | None) -> 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input_dir", type=Path, help="包含原始 T01-T04 CSV 的目录")
+    parser.add_argument("input_dir", type=Path, help="包含原始试次 CSV 的目录")
     parser.add_argument("--output", type=Path, help="输出 CSV；默认 INPUT_DIR/[SUBJECT_]state_changes.auto.csv")
     parser.add_argument("--subject", help="只处理指定受试者，例如 P04")
     parser.add_argument("--reference", type=Path, help="可选参考标注，仅用于验证")

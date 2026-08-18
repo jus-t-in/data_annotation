@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import colorsys
+import hashlib
+
 APP_NAME = "步态数据标注器"
 VERSION = "0.1.0"
 REPORT_SCHEMA_VERSION = 1
@@ -47,19 +50,64 @@ STATE_COLORS = {
     ("OTHER", "LEVEL"): "#F44336",
 }
 
+TERRAIN_COLORS = {"LEVEL": "#83918B", "ASCENT": "#BD7A3B", "DESCENT": "#527B94"}
+
 LEFT_COLOR = "#D84315"
 RIGHT_COLOR = "#1565C0"
 PITCH_COLOR = "#616161"
 MOTION_COLOR = "#2E7D32"
 IMPACT_COLOR = "#C62828"
+_COLOR_SCOPE_OFFSETS = {"state": 0.0, "terrain": 0.5, "activity": 0.25}
+_RESERVED_COLORS = tuple({*STATE_COLORS.values(), *TERRAIN_COLORS.values()})
 
 
-def valid_state(activity: str, terrain: str) -> bool:
-    if activity not in ACTIVITY_NAMES or terrain not in TERRAIN_NAMES:
+def _rgb(color: str) -> tuple[int, int, int]:
+    return tuple(int(color[index : index + 2], 16) for index in (1, 3, 5))
+
+
+def _generated_color(scope: str, *values: str) -> str:
+    digest = hashlib.sha256("\0".join((scope, *values)).encode("utf-8")).digest()
+    base_hue = int.from_bytes(digest[:2], "big") / 65536.0
+    saturation = 0.55 + digest[2] / 255.0 * 0.12
+    lightness = 0.42 + digest[3] / 255.0 * 0.08
+    for step in range(24):
+        hue = (base_hue + _COLOR_SCOPE_OFFSETS[scope] + step / 24.0) % 1.0
+        red, green, blue = colorsys.hls_to_rgb(hue, lightness, saturation)
+        color = "#{:02X}{:02X}{:02X}".format(round(red * 255), round(green * 255), round(blue * 255))
+        rgb = _rgb(color)
+        distinct = all(
+            sum((left - right) ** 2 for left, right in zip(rgb, _rgb(reserved))) >= 55**2
+            for reserved in _RESERVED_COLORS
+        )
+        if distinct:
+            return color
+    return color
+
+
+def label_color(track: str, name: str) -> str:
+    if track == "terrain":
+        return TERRAIN_COLORS[name] if name in TERRAIN_COLORS else _generated_color("terrain", name)
+    if track == "activity":
+        return STATE_COLORS.get((name, "LEVEL")) or _generated_color("activity", name)
+    raise ValueError(f"未知标签轨道：{track}")
+
+
+def state_color(activity: str, terrain: str) -> str:
+    return STATE_COLORS.get((activity, terrain)) or _generated_color("state", activity, terrain)
+
+
+def valid_state(activity: str, terrain: str, catalog=None) -> bool:
+    if catalog is None:
+        if activity not in ACTIVITY_NAMES or terrain not in TERRAIN_NAMES:
+            return False
+    elif not catalog.contains("activity", activity) or not catalog.contains("terrain", terrain):
         return False
-    return terrain == "LEVEL" or activity in {"STILL", "WALKING"}
+    if terrain in {"ASCENT", "DESCENT"}:
+        return activity in {"STILL", "WALKING"}
+    return True
 
 
-def state_name(activity: str, terrain: str) -> str:
-    return f"{ACTIVITY_NAMES.get(activity, activity)}·{TERRAIN_NAMES.get(terrain, terrain)}"
-
+def state_name(activity: str, terrain: str, catalog=None) -> str:
+    activity_name = catalog.display("activity", activity) if catalog else ACTIVITY_NAMES.get(activity, activity)
+    terrain_name = catalog.display("terrain", terrain) if catalog else TERRAIN_NAMES.get(terrain, terrain)
+    return f"{activity_name}·{terrain_name}"

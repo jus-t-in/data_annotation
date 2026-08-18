@@ -7,3 +7,11 @@ dist/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Local development files
+.idea/
+.vscode/
+.DS_Store
+*.log
+.env
+.env.*

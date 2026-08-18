@@ -10,7 +10,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Iterable
 
-from .constants import ACTIVITY_NAMES, TERRAIN_NAMES, valid_state
+from .constants import valid_state
+from .labels import LabelCatalog
 from .trial import TrialData
 
 EVENT_NAMESPACE = uuid.UUID("882cd0e8-4f5e-4c03-a744-bc31f6ee6a09")
@@ -185,7 +186,9 @@ class AnnotationDocument:
         detail: dict | None = None,
         deleted: list[dict] | None = None,
         reviewed: dict | None = None,
+        catalog: LabelCatalog | None = None,
     ):
+        self.catalog = catalog or LabelCatalog.default()
         self.trial = trial
         self.boundaries = list(boundaries)
         self.confirmations = list(confirmations)
@@ -194,6 +197,9 @@ class AnnotationDocument:
         self.deleted = deleted or []
         self.reviewed = reviewed
         self.dirty = False
+        for item in self.boundaries:
+            if not self.catalog.contains(item.track.value, item.value):
+                self.catalog.add(item.track.value, item.value)
         self._undo: list[dict] = []
         self._redo: list[dict] = []
         self._normalize()
@@ -207,13 +213,16 @@ class AnnotationDocument:
         issues: Iterable[ReviewIssue] = (),
         *,
         detail: dict | None = None,
+        catalog: LabelCatalog | None = None,
     ) -> "AnnotationDocument":
+        catalog = catalog or LabelCatalog.default()
+        catalog.discover_rows(rows)
         if not rows:
             initial = [
                 Boundary(Track.ACTIVITY, 0, "STILL", Provenance.AUTO),
                 Boundary(Track.TERRAIN, 0, "LEVEL", Provenance.AUTO),
             ]
-            return cls(trial, initial, issues=issues, detail=detail)
+            return cls(trial, initial, issues=issues, detail=detail, catalog=catalog)
         located = []
         imported_issues = list(issues)
         for row in rows:
@@ -309,7 +318,7 @@ class AnnotationDocument:
                         )
                     )
             previous = state
-        return cls(trial, boundaries, confirmations, imported_issues, detail=detail)
+        return cls(trial, boundaries, confirmations, imported_issues, detail=detail, catalog=catalog)
 
     def _state_dict(self) -> dict:
         return {
@@ -327,7 +336,7 @@ class AnnotationDocument:
         return result
 
     @classmethod
-    def from_dict(cls, trial: TrialData, value: dict) -> "AnnotationDocument":
+    def from_dict(cls, trial: TrialData, value: dict, catalog: LabelCatalog | None = None) -> "AnnotationDocument":
         document = cls(
             trial,
             [Boundary.from_dict(item) for item in value["boundaries"]],
@@ -335,7 +344,7 @@ class AnnotationDocument:
             [ReviewIssue.from_dict(item) for item in value.get("issues", [])],
             detail=value.get("detail"),
             deleted=value.get("deleted"),
-            reviewed=value.get("reviewed"),
+            reviewed=value.get("reviewed"), catalog=catalog,
         )
         document.baseline = copy.deepcopy(value.get("baseline", document._state_dict()))
         document.dirty = document._state_dict() != document.baseline
@@ -486,7 +495,7 @@ class AnnotationDocument:
             if any(not 0 <= item.sample_index < sample_count for item in items):
                 errors.append(f"{track.value} 存在越界边界")
         for event in self.composed_events():
-            if not valid_state(event.activity, event.terrain):
+            if not valid_state(event.activity, event.terrain, self.catalog):
                 errors.append(f"{self.trial.timestamp(event.sample_index)} 的组合状态非法")
         occupied = {item.sample_index for item in self.boundaries}
         if len({item.sample_index for item in self.confirmations}) != len(self.confirmations):
@@ -519,8 +528,7 @@ class AnnotationDocument:
         if sum(item.kind is ConfirmationKind.TRIAL_END for item in self.confirmations) > 1:
             errors.append("试次存在多个收尾确认")
         for item in self.boundaries:
-            allowed = ACTIVITY_NAMES if item.track is Track.ACTIVITY else TERRAIN_NAMES
-            if item.value not in allowed:
+            if not self.catalog.contains(item.track.value, item.value):
                 errors.append(f"未知标签：{item.value}")
             if len(item.user_note) > 500 or any(ord(char) < 32 for char in item.user_note):
                 errors.append("边界备注含控制字符或超过 500 字")
@@ -572,8 +580,7 @@ class AnnotationDocument:
 
     def set_boundary_value(self, boundary_id: str, value: str) -> None:
         item = self.find_boundary(boundary_id)
-        allowed = ACTIVITY_NAMES if item.track is Track.ACTIVITY else TERRAIN_NAMES
-        if value not in allowed:
+        if not self.catalog.contains(item.track.value, value):
             raise ValueError(f"未知标签：{value}")
         self._checkpoint()
         item.value = value
@@ -595,8 +602,7 @@ class AnnotationDocument:
         self.dirty = self._state_dict() != self.baseline
 
     def add_boundary(self, track: Track, sample_index: int, value: str) -> Boundary:
-        allowed = ACTIVITY_NAMES if track is Track.ACTIVITY else TERRAIN_NAMES
-        if value not in allowed:
+        if not self.catalog.contains(track.value, value):
             raise ValueError(f"未知标签：{value}")
         if not 0 <= sample_index < len(self.trial.seconds):
             raise ValueError("边界时刻超出试次范围")
@@ -607,8 +613,7 @@ class AnnotationDocument:
         return item
 
     def add_interval(self, track: Track, start: int, end: int, value: str) -> None:
-        allowed = ACTIVITY_NAMES if track is Track.ACTIVITY else TERRAIN_NAMES
-        if value not in allowed:
+        if not self.catalog.contains(track.value, value):
             raise ValueError(f"未知标签：{value}")
         if not 0 < start < end < len(self.trial.seconds):
             raise ValueError("区间必须位于试次内部并至少跨越一个采样间隔")

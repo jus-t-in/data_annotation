@@ -17,7 +17,7 @@ from .constants import (
     MOTION_COLOR,
     PITCH_COLOR,
     RIGHT_COLOR,
-    STATE_COLORS,
+    state_color,
     state_name,
 )
 from .model import AnnotationDocument, ConfirmationKind
@@ -51,7 +51,7 @@ def render_annotation_png(
         start = float(x[start_index])
         end = float(x[end_index])
         state = (activity, terrain)
-        color = STATE_COLORS.get(state, "#607D8B")
+        color = state_color(*state)
         leg_ax.axvspan(start, end, color=color, alpha=0.18, zorder=0)
         if state not in present_states:
             present_states.append(state)
@@ -84,7 +84,7 @@ def render_annotation_png(
             ConfirmationKind.STAIR_SECOND_STEP.value: "第二步确认",
             ConfirmationKind.TRIAL_END.value: "收尾确认",
         }[event.kind]
-        label = event.user_note or f"{kind}：{state_name(event.activity, event.terrain)}"
+        label = event.user_note or f"{kind}：{state_name(event.activity, event.terrain, document.catalog)}"
         lane = position % lane_count
         note_ax.annotate(
             label,
@@ -125,7 +125,7 @@ def render_annotation_png(
         Line2D([0], [0], color=RIGHT_COLOR, linewidth=1.5, label="右腿位置"),
     ]
     handles.extend(
-        Patch(facecolor=STATE_COLORS.get(state, "#607D8B"), alpha=0.35, label=state_name(*state))
+        Patch(facecolor=state_color(*state), alpha=0.35, label=state_name(*state, document.catalog))
         for state in present_states
     )
     fig.legend(handles=handles, loc="lower center", ncol=min(6, len(handles)), frameon=False, fontsize=8.5)

@@ -9,8 +9,9 @@ os.environ.setdefault("QT_OPENGL", "software")
 import numpy as np
 import pytest
 import pyqtgraph as pg
-from PySide6 import QtCore, QtTest, QtWidgets
+from PySide6 import QtCore, QtGui, QtTest, QtWidgets
 
+from youbu_annotation.constants import label_color, state_color
 from youbu_annotation.gui import AnnotationEditor, EventLabel
 from youbu_annotation.model import AnnotationDocument, Boundary, Confirmation, ConfirmationKind, Provenance, Track
 from youbu_annotation.trial import TrialData
@@ -194,6 +195,30 @@ def test_main_annotations_select_events(editor: AnnotationEditor, application) -
 
     assert editor.selected_component_id == component.id
     assert editor.cursor_index == component.sample_index
+
+
+def test_custom_label_colors_reach_editor_overlays(editor: AnnotationEditor, application) -> None:
+    assert editor.document is not None
+    editor.catalog.add(Track.TERRAIN, "INCLINE")
+    editor.document.add_boundary(Track.TERRAIN, 5, "INCLINE")
+    editor._refresh()
+    application.processEvents()
+
+    intervals = editor.document.intervals()
+    regions = [item for item in editor._main_annotation_items if isinstance(item, pg.LinearRegionItem)]
+    assert [region.brush.color().name() for region in regions] == [
+        QtGui.QColor(state_color(activity, terrain)).name()
+        for _start, _end, activity, terrain in intervals
+    ]
+
+    rectangles = [item for item in editor._state_items if isinstance(item, QtWidgets.QGraphicsRectItem)]
+    assert len(rectangles) == len(intervals) * 2
+    for index, (_start, _end, _activity, terrain) in enumerate(intervals):
+        assert rectangles[index * 2].brush().color().name() == regions[index].brush.color().name()
+        assert rectangles[index * 2 + 1].brush().color().name() == QtGui.QColor(
+            label_color("terrain", terrain)
+        ).name()
+    editor.document.dirty = False
 
 
 def test_overview_tracks_detail_range(editor: AnnotationEditor, application) -> None:

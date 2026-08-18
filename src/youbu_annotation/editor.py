@@ -17,7 +17,7 @@ from .gui import AnnotationEditor
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input_csv", nargs="?", type=Path, help="可选的 T01-T04 原始试次 CSV")
+    parser.add_argument("input_csv", nargs="?", type=Path, help="可选的原始试次 CSV")
     parser.add_argument("--annotations", type=Path, help="可选的聚合标注 CSV")
     parser.add_argument("--version", action="version", version=f"{APP_NAME} {VERSION}")
     return parser.parse_args()

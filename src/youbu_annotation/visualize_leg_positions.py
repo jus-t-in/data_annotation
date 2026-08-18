@@ -23,6 +23,8 @@ try:
 except ImportError:
     raise SystemExit("缺少 matplotlib，请先安装项目运行依赖：python3 -m pip install .")
 
+from .constants import state_color
+
 plt.rcParams["font.sans-serif"] = ["Noto Sans CJK SC", "Droid Sans Fallback", "sans-serif"]
 plt.rcParams["axes.unicode_minus"] = False
 
@@ -47,24 +49,6 @@ ACTIVITY_NAMES = {
     "OTHER": "协议外动作",
 }
 TERRAIN_NAMES = {"LEVEL": "平地", "ASCENT": "上楼", "DESCENT": "下楼"}
-STATE_COLORS = {
-    ("STILL", "LEVEL"): "#9E9E9E",
-    ("WALKING", "LEVEL"): "#4CAF50",
-    ("WALKING", "ASCENT"): "#FF9800",
-    ("WALKING", "DESCENT"): "#2196F3",
-    ("STILL", "ASCENT"): "#FFC107",
-    ("STILL", "DESCENT"): "#03A9F4",
-    ("BEND", "LEVEL"): "#8E44AD",
-    ("SQUAT", "LEVEL"): "#E91E63",
-    ("HIGH_KNEE_SINGLE", "LEVEL"): "#00ACC1",
-    ("HIGH_KNEE_ALTERNATING", "LEVEL"): "#7CB342",
-    ("TURNING_LEFT", "LEVEL"): "#5C6BC0",
-    ("TURNING_RIGHT", "LEVEL"): "#AB47BC",
-    ("SHUFFLE", "LEVEL"): "#795548",
-    ("OTHER", "LEVEL"): "#F44336",
-}
-
-
 @dataclass(frozen=True)
 class Event:
     timestamp: datetime | float
@@ -222,7 +206,7 @@ def plot_file(path: Path, events: list[Event], output_dir: Path) -> Path:
         ax.axvspan(
             span_start,
             span_end,
-            color=STATE_COLORS.get(state, "#607D8B"),
+            color=state_color(*state),
             alpha=0.18,
             zorder=0,
         )
@@ -290,7 +274,7 @@ def plot_file(path: Path, events: list[Event], output_dir: Path) -> Path:
     ]
     handles.extend(
         Patch(
-            facecolor=STATE_COLORS.get(state, "#607D8B"),
+            facecolor=state_color(*state),
             alpha=0.35,
             label=state_name(state),
         )
