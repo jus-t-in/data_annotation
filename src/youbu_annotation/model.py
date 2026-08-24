@@ -10,7 +10,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Iterable
 
+from .constants import valid_state
 from .label_schema import DEFAULT_V2_SCHEMA, LabelSchema, Track
+from .labels import LabelCatalog
 from .trial import TrialData
 
 EVENT_NAMESPACE = uuid.UUID("882cd0e8-4f5e-4c03-a744-bc31f6ee6a09")
@@ -181,7 +183,9 @@ class AnnotationDocument:
         detail: dict | None = None,
         deleted: list[dict] | None = None,
         reviewed: dict | None = None,
+        catalog: LabelCatalog | None = None,
     ):
+        self.catalog = catalog or LabelCatalog.default()
         self.trial = trial
         self.label_schema = label_schema or DEFAULT_V2_SCHEMA
         self.boundaries = list(boundaries)
@@ -190,11 +194,25 @@ class AnnotationDocument:
         self.detail = detail or {}
         self.deleted = deleted or []
         self.reviewed = reviewed
+        for item in self.boundaries:
+            if not self.catalog.contains(item.track.value, item.value):
+                self.catalog.add(item.track.value, item.value)
         self.dirty = False
         self._undo: list[dict] = []
         self._redo: list[dict] = []
         self._normalize()
         self.baseline = self._state_dict()
+
+    def _catalog_mode(self) -> bool:
+        return self.label_schema.content_hash == DEFAULT_V2_SCHEMA.content_hash
+
+    def _allows_state(self, activity: str, terrain: str) -> bool:
+        return valid_state(activity, terrain, self.catalog) if self._catalog_mode() else self.label_schema.allows(activity, terrain)
+
+    def _has_label(self, track: Track, value: str, *, active_only: bool = False) -> bool:
+        if self._catalog_mode():
+            return self.catalog.is_enabled(track.value, value) if active_only else self.catalog.contains(track.value, value)
+        return self.label_schema.has_label(track, value, active_only=active_only)
 
     @classmethod
     def from_rows(
@@ -205,15 +223,18 @@ class AnnotationDocument:
         *,
         label_schema: LabelSchema | None = None,
         detail: dict | None = None,
+        catalog: LabelCatalog | None = None,
     ) -> "AnnotationDocument":
         label_schema = label_schema or DEFAULT_V2_SCHEMA
+        catalog = catalog or LabelCatalog.default()
+        catalog.discover_rows(rows)
         if not rows:
             activity, terrain = label_schema.default_state()
             initial = [
                 Boundary(Track.ACTIVITY, 0, activity, Provenance.AUTO),
                 Boundary(Track.TERRAIN, 0, terrain, Provenance.AUTO),
             ]
-            return cls(trial, initial, issues=issues, label_schema=label_schema, detail=detail)
+            return cls(trial, initial, issues=issues, label_schema=label_schema, detail=detail, catalog=catalog)
         located = []
         imported_issues = list(issues)
         for row in rows:
@@ -316,6 +337,7 @@ class AnnotationDocument:
             imported_issues,
             label_schema=label_schema,
             detail=detail,
+            catalog=catalog,
         )
 
     def _state_dict(self) -> dict:
@@ -341,6 +363,7 @@ class AnnotationDocument:
         value: dict,
         *,
         label_schema: LabelSchema | None = None,
+        catalog: LabelCatalog | None = None,
     ) -> "AnnotationDocument":
         schema = label_schema or (
             LabelSchema.from_dict(value["label_schema"])
@@ -356,6 +379,7 @@ class AnnotationDocument:
             detail=value.get("detail"),
             deleted=value.get("deleted"),
             reviewed=value.get("reviewed"),
+            catalog=catalog,
         )
         document.baseline = copy.deepcopy(value.get("baseline", document._state_dict()))
         document.dirty = document._state_dict() != document.baseline
@@ -506,7 +530,7 @@ class AnnotationDocument:
             if any(not 0 <= item.sample_index < sample_count for item in items):
                 errors.append(f"{track.value} 存在越界边界")
         for event in self.composed_events():
-            if not self.label_schema.allows(event.activity, event.terrain):
+            if not self._allows_state(event.activity, event.terrain):
                 errors.append(f"{self.trial.timestamp(event.sample_index)} 的组合状态非法")
         occupied = {item.sample_index for item in self.boundaries}
         if len({item.sample_index for item in self.confirmations}) != len(self.confirmations):
@@ -539,7 +563,7 @@ class AnnotationDocument:
         if sum(item.kind is ConfirmationKind.TRIAL_END for item in self.confirmations) > 1:
             errors.append("试次存在多个收尾确认")
         for item in self.boundaries:
-            if not self.label_schema.has_label(item.track, item.value):
+            if not self._has_label(item.track, item.value):
                 errors.append(f"未知标签：{item.value}")
             if len(item.user_note) > 500 or any(ord(char) < 32 for char in item.user_note):
                 errors.append("边界备注含控制字符或超过 500 字")
@@ -591,7 +615,7 @@ class AnnotationDocument:
 
     def set_boundary_value(self, boundary_id: str, value: str) -> None:
         item = self.find_boundary(boundary_id)
-        if not self.label_schema.has_label(item.track, value, active_only=True):
+        if not self._has_label(item.track, value, active_only=True):
             raise ValueError(f"未知标签：{value}")
         self._checkpoint()
         item.value = value
@@ -613,7 +637,7 @@ class AnnotationDocument:
         self.dirty = self._state_dict() != self.baseline
 
     def add_boundary(self, track: Track, sample_index: int, value: str) -> Boundary:
-        if not self.label_schema.has_label(track, value, active_only=True):
+        if not self._has_label(track, value, active_only=True):
             raise ValueError(f"未知标签：{value}")
         if not 0 <= sample_index < len(self.trial.seconds):
             raise ValueError("边界时刻超出试次范围")
@@ -624,7 +648,7 @@ class AnnotationDocument:
         return item
 
     def add_interval(self, track: Track, start: int, end: int, value: str) -> None:
-        if not self.label_schema.has_label(track, value, active_only=True):
+        if not self._has_label(track, value, active_only=True):
             raise ValueError(f"未知标签：{value}")
         if not 0 < start < end < len(self.trial.seconds):
             raise ValueError("区间必须位于试次内部并至少跨越一个采样间隔")

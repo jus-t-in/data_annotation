@@ -20,9 +20,10 @@ from .constants import (
     MOTION_COLOR,
     PITCH_COLOR,
     RIGHT_COLOR,
-    STATE_COLORS,
     TERRAIN_NAMES,
     VERSION,
+    label_color,
+    state_color,
     state_name,
 )
 from .model import (
@@ -34,6 +35,7 @@ from .model import (
     Severity,
     Track,
 )
+from .labels import LabelCatalog
 from .recovery import RecoveryConflictError, RecoveryStore
 from .renderer import render_annotation_png
 from .storage import AnnotationRepository, AnnotationStorageError
@@ -100,6 +102,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.resize(1440, 900)
         self.setMinimumSize(1100, 680)
         self.settings = QtCore.QSettings("Youbu", "AnnotationEditor")
+        self.catalog = LabelCatalog.default()
         self.thread_pool = QtCore.QThreadPool.globalInstance()
         self._workers: set[BackgroundTask] = set()
         self.trial: TrialData | None = None
@@ -148,6 +151,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.recognize_action = QtGui.QAction(self._icon(style.SP_BrowserReload), "重新识别", self)
         self.delete_action = QtGui.QAction(self._icon(style.SP_TrashIcon), "删除所选分量", self)
         self.delete_action.setShortcut(QtGui.QKeySequence.StandardKey.Delete)
+        self.labels_action = QtGui.QAction("管理标注类别", self)
         self.auxiliary_actions: dict[str, QtGui.QAction] = {}
         for name, label, default in (
             ("overview", "全局概览", True),
@@ -164,7 +168,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction("退出", self.close, QtGui.QKeySequence.StandardKey.Quit)
         edit_menu = self.menuBar().addMenu("编辑")
-        edit_menu.addActions((self.undo_action, self.redo_action, self.delete_action, self.recognize_action))
+        edit_menu.addActions((self.undo_action, self.redo_action, self.delete_action, self.recognize_action, self.labels_action))
         help_menu = self.menuBar().addMenu("帮助")
         help_menu.addAction("关于", self._about)
 
@@ -200,6 +204,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             self.redo_action,
             self.recognize_action,
             self.delete_action,
+            self.labels_action,
         ]
 
     def _build_ui(self) -> None:
@@ -426,14 +431,14 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         activity_row = QtWidgets.QWidget()
         activity_layout = QtWidgets.QHBoxLayout(activity_row)
         activity_layout.setContentsMargins(0, 0, 0, 0)
-        self.new_activity_combo = self._label_combo(ACTIVITY_NAMES)
+        self.new_activity_combo = self._label_combo(Track.ACTIVITY)
         self.add_activity_button = QtWidgets.QPushButton("添加活动边界")
         activity_layout.addWidget(self.new_activity_combo, 1)
         activity_layout.addWidget(self.add_activity_button)
         terrain_row = QtWidgets.QWidget()
         terrain_layout = QtWidgets.QHBoxLayout(terrain_row)
         terrain_layout.setContentsMargins(0, 0, 0, 0)
-        self.new_terrain_combo = self._label_combo(TERRAIN_NAMES)
+        self.new_terrain_combo = self._label_combo(Track.TERRAIN)
         self.add_terrain_button = QtWidgets.QPushButton("添加地形边界")
         terrain_layout.addWidget(self.new_terrain_combo, 1)
         terrain_layout.addWidget(self.add_terrain_button)
@@ -529,12 +534,22 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         widget.style().polish(widget)
         widget.update()
 
-    @staticmethod
-    def _label_combo(labels: dict[str, str]) -> QtWidgets.QComboBox:
+    def _label_combo(self, track: Track) -> QtWidgets.QComboBox:
         combo = QtWidgets.QComboBox()
-        for value, display in labels.items():
+        for value, display, _enabled in self.catalog.entries(track):
             combo.addItem(display, value)
         return combo
+
+    def _refresh_label_combos(self) -> None:
+        for combo, track in ((self.new_activity_combo, Track.ACTIVITY), (self.new_terrain_combo, Track.TERRAIN)):
+            current = combo.currentData()
+            combo.blockSignals(True)
+            combo.clear()
+            for value, display, _enabled in self.catalog.entries(track):
+                combo.addItem(display, value)
+            combo.setCurrentIndex(max(0, combo.findData(current)))
+            combo.blockSignals(False)
+        self._update_interval_values()
 
     def _configure_plots(self) -> None:
         self.overview_plot.setMenuEnabled(False)
@@ -789,6 +804,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.redo_action.triggered.connect(self.redo)
         self.recognize_action.triggered.connect(self.rerun_recognition)
         self.delete_action.triggered.connect(self.delete_selected)
+        self.labels_action.triggered.connect(self.manage_labels)
         self.delete_button.clicked.connect(self.delete_selected)
         self.raw_checkbox.toggled.connect(self._toggle_raw)
         for name, action in self.auxiliary_actions.items():
@@ -884,7 +900,8 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         except AnnotationStorageError as exc:
             QtWidgets.QMessageBox.critical(self, "无法打开标注文件", str(exc))
             return
-        recovery = RecoveryStore(trial, target)
+        self.catalog = repository.catalog
+        recovery = RecoveryStore(trial, target, catalog=self.catalog)
         document = self._choose_recovery(recovery)
         if document is False:
             repository.close()
@@ -903,6 +920,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.source_label.setToolTip(str(trial.path))
         self.target_label.setText(f"标注文件：{target}")
         self.target_label.setToolTip(str(target))
+        self._refresh_label_combos()
         self._plot_trial()
         if document is None:
             self.document = None
@@ -939,6 +957,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
     def _initial_recognition_finished(self, result: object) -> None:
         if not isinstance(result, AnnotationDocument) or self.trial is not result.trial:
             return
+        result.catalog = self.catalog
         self.document = result
         self._refresh()
         self.statusBar().showMessage("自动识别完成，结果为待复核草稿", 5000)
@@ -953,10 +972,13 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self._dispose_session()
         self.trial = trial
         self.document = document
+        self.catalog = repository.catalog if repository else document.catalog
+        self.document.catalog = self.catalog
         self.repository = repository
-        self.recovery = RecoveryStore(trial, repository.target) if repository else None
+        self.recovery = RecoveryStore(trial, repository.target, catalog=self.catalog) if repository else None
         self.source_label.setText(f"{trial.session_id} / {trial.trial_id}    {trial.path.name}")
         self.target_label.setText(f"标注文件：{repository.target}" if repository else "标注文件：未连接")
+        self._refresh_label_combos()
         self._plot_trial()
         self._refresh()
 
@@ -975,7 +997,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         except AnnotationStorageError as exc:
             QtWidgets.QMessageBox.critical(self, "无法选择标注文件", str(exc))
             return
-        recovery = RecoveryStore(self.trial, target)
+        recovery = RecoveryStore(self.trial, target, catalog=repository.catalog)
         incoming = self._choose_recovery(recovery)
         if incoming is False:
             repository.close()
@@ -1001,6 +1023,9 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.recovery = recovery
         if incoming is not None:
             self.document = incoming
+        self.catalog = repository.catalog
+        self.document.catalog = self.catalog
+        self._refresh_label_combos()
         if old_repository:
             old_repository.close()
         self.target_label.setText(f"标注文件：{target}")
@@ -1067,18 +1092,17 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             plot.removeItem(cursor)
         self._cursor_lines.clear()
 
-    @staticmethod
-    def _event_short_label(event) -> str:
+    def _event_short_label(self, event) -> str:
         kind = KIND_NAMES[event.kind]
         if event.kind in {ConfirmationKind.STAIR_SECOND_STEP.value, ConfirmationKind.TRIAL_END.value}:
             return kind
-        return f"{kind}  {state_name(event.activity, event.terrain)}"
+        return f"{kind}  {state_name(event.activity, event.terrain, self.catalog)}"
 
     def _event_tooltip(self, event) -> str:
         assert self.trial is not None
         lines = [
             self.trial.timestamp(event.sample_index),
-            f"{KIND_NAMES[event.kind]}：{state_name(event.activity, event.terrain)}",
+            f"{KIND_NAMES[event.kind]}：{state_name(event.activity, event.terrain, self.catalog)}",
             f"来源：{SOURCE_NAMES[event.provenance]}",
         ]
         if event.user_note:
@@ -1095,7 +1119,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
 
         trial, document = self.trial, self.document
         for start_index, end_index, activity, terrain in document.intervals():
-            color = QtGui.QColor(STATE_COLORS.get((activity, terrain), "#607D8B"))
+            color = QtGui.QColor(state_color(activity, terrain))
             color.setAlpha(38)
             region = pg.LinearRegionItem(
                 values=(float(trial.seconds[start_index]), float(trial.seconds[end_index])),
@@ -1171,11 +1195,10 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         trial, document = self.trial, self.document
         self._populate_main_annotations()
         duration = max(trial.duration, 1e-9)
-        terrain_colors = {"LEVEL": "#83918b", "ASCENT": "#bd7a3b", "DESCENT": "#527b94"}
         for start_index, end_index, activity, terrain in document.intervals():
             start, end = float(trial.seconds[start_index]), float(trial.seconds[end_index])
             width = max(end - start, duration / max(len(trial.seconds), 1))
-            for y, color in ((1.05, STATE_COLORS.get((activity, terrain), "#607D8B")), (0.05, terrain_colors[terrain])):
+            for y, color in ((1.05, state_color(activity, terrain)), (0.05, label_color("terrain", terrain))):
                 rectangle = QtWidgets.QGraphicsRectItem(start, y, width, 0.8)
                 brush = QtGui.QColor(color)
                 brush.setAlpha(105)
@@ -1185,7 +1208,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
                 self.state_plot.addItem(rectangle)
                 self._state_items.append(rectangle)
             if end - start > duration * 0.075:
-                activity_text = pg.TextItem(ACTIVITY_NAMES.get(activity, activity), color="#34413b", anchor=(0, 0.5))
+                activity_text = pg.TextItem(self.catalog.display("activity", activity), color="#34413b", anchor=(0, 0.5))
                 activity_text.setPos(start + min(0.25, (end - start) * 0.04), 1.45)
                 activity_text.setZValue(-2)
                 self.state_plot.addItem(activity_text)
@@ -1332,8 +1355,8 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             values = (
                 self.trial.timestamp(event.sample_index),
                 KIND_NAMES[event.kind],
-                ACTIVITY_NAMES.get(event.activity, event.activity),
-                TERRAIN_NAMES.get(event.terrain, event.terrain),
+                self.catalog.display("activity", event.activity),
+                self.catalog.display("terrain", event.terrain),
                 SOURCE_NAMES[event.provenance],
                 event.user_note,
             )
@@ -1411,9 +1434,9 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             self.value_combo.blockSignals(False)
             return
         if isinstance(component, Boundary):
-            labels = ACTIVITY_NAMES if component.track is Track.ACTIVITY else TERRAIN_NAMES
-            for value, display in labels.items():
-                self.value_combo.addItem(display, value)
+            for value, display, enabled in self.catalog.entries(component.track, include=(component.value,)):
+                suffix = "（已停用）" if not enabled else ""
+                self.value_combo.addItem(f"{display}{suffix}", value)
             self.value_combo.setCurrentIndex(self.value_combo.findData(component.value))
             self.value_combo.setEnabled(True)
         else:
@@ -1541,12 +1564,69 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         combo = self.interval_value_combo
         current = combo.currentData()
         combo.clear()
-        labels = ACTIVITY_NAMES if self.interval_track_combo.currentData() is Track.ACTIVITY else TERRAIN_NAMES
-        for value, display in labels.items():
+        track = self.interval_track_combo.currentData()
+        for value, display, _enabled in self.catalog.entries(track):
             combo.addItem(display, value)
         index = combo.findData(current)
         if index >= 0:
             combo.setCurrentIndex(index)
+
+    def manage_labels(self) -> None:
+        if self.repository is None:
+            return
+        catalog = LabelCatalog(dict(self.catalog.activities), dict(self.catalog.terrains))
+        track_name, accepted = QtWidgets.QInputDialog.getItem(
+            self, "管理标注类别", "类别轨道：", ["活动", "地形"], 0, False
+        )
+        if not accepted:
+            return
+        track = Track.ACTIVITY if track_name == "活动" else Track.TERRAIN
+        operation, accepted = QtWidgets.QInputDialog.getItem(
+            self, "管理标注类别", "操作：", ["添加", "停用", "启用"], 0, False
+        )
+        if not accepted:
+            return
+        if operation == "添加":
+            name, accepted = QtWidgets.QInputDialog.getText(self, "添加标注类别", "类别名称：")
+            if not accepted:
+                return
+            try:
+                catalog.add(track, name)
+            except ValueError as exc:
+                QtWidgets.QMessageBox.warning(self, "无法添加类别", str(exc))
+                return
+        else:
+            enabled = operation == "启用"
+            candidates = [
+                (value, display)
+                for value, display, state in catalog.entries(track, include_disabled=True)
+                if state is not enabled
+                and value not in (ACTIVITY_NAMES if track is Track.ACTIVITY else TERRAIN_NAMES)
+            ]
+            if not candidates:
+                QtWidgets.QMessageBox.information(self, "管理标注类别", "没有可操作的自定义类别")
+                return
+            labels = [display for _value, display in candidates]
+            selected, accepted = QtWidgets.QInputDialog.getItem(self, "管理标注类别", "类别：", labels, 0, False)
+            if not accepted:
+                return
+            value = candidates[labels.index(selected)][0]
+            try:
+                (catalog.enable if enabled else catalog.disable)(track, value)
+            except ValueError as exc:
+                QtWidgets.QMessageBox.warning(self, "无法修改类别", str(exc))
+                return
+        try:
+            catalog.save(self.repository.catalog_path)
+        except OSError as exc:
+            QtWidgets.QMessageBox.critical(self, "类别目录保存失败", str(exc))
+            return
+        self.catalog = catalog
+        self.repository.catalog = self.catalog
+        if self.document is not None:
+            self.document.catalog = self.catalog
+        self._refresh_label_combos()
+        self._refresh(select_component=self.selected_component_id)
 
     def _set_interval_edge(self, start: bool) -> None:
         if start:

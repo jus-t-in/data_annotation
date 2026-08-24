@@ -1,6 +1,6 @@
 # 步态数据标注器
 
-步态数据标注器是面向 T01-T04 协议试次的 Linux 离线桌面工具集。该目录是完整、可独立复制和构建的 Python 项目，不依赖仓库外的脚本或示例数据。
+步态数据标注器是面向协议试次的 Linux 离线桌面工具集。该目录是完整、可独立复制和构建的 Python 项目，不依赖仓库外的脚本或示例数据。
 
 工具集包含：
 
@@ -131,7 +131,7 @@ youbu-annotation /data/P03_S01_T01_.csv \
 
 ## 自动标注
 
-处理目录中的全部 T01-T04 文件：
+处理目录中的全部试次文件：
 
 ```bash
 youbu-auto-annotate /data
@@ -194,7 +194,7 @@ youbu-visualize \
 
 ## 输入约束
 
-原始 CSV 必须为 UTF-8 或 UTF-8 BOM，使用英文逗号分隔。文件名需符合 P<编号>_S<编号>_T01-T04...csv。必需信号包括：
+原始 CSV 必须为 UTF-8 或 UTF-8 BOM，使用英文逗号分隔。文件名需符合 `P<数字>_S<数字>_T<数字>...csv`，例如 `P06_S01_T05_v2.csv`。必需信号包括：
 
 - RX Date/Time 或 Elapsed (s) 时间列。
 - 三轴 Accelerometer/* 与三轴 Gyroscope/*。
@@ -204,7 +204,7 @@ youbu-visualize \
 
 所有必需数值必须有限。输入按时间排序，同时间戳的重复行逐通道平均；相邻采样超过 1.0 秒记为数据断档。
 
-活动标签固定为 STILL、WALKING、BEND、SQUAT、HIGH_KNEE_SINGLE、HIGH_KNEE_ALTERNATING、TURNING_LEFT、TURNING_RIGHT、SHUFFLE 和 OTHER。地形标签固定为 LEVEL、ASCENT、DESCENT。楼梯地形只允许与 STILL 或 WALKING 组合。
+默认活动标签为 STILL、WALKING、BEND、SQUAT、HIGH_KNEE_SINGLE、HIGH_KNEE_ALTERNATING、TURNING_LEFT、TURNING_RIGHT、SHUFFLE 和 OTHER；默认地形标签为 LEVEL、ASCENT、DESCENT。可通过编辑器的“编辑 -> 管理标注类别”添加、停用或重新启用项目级自定义活动与地形。类别保存在标注 CSV 同目录的 `label_catalog.json`；导入标注 CSV 中未登记的类别时会自动加入。停用的类别不再用于新标注，但已有历史标注仍可载入和保存。ASCENT、DESCENT 只允许与 STILL 或 WALKING 组合，自定义地形不受此组合限制。
 
 ## 正式输出
 
@@ -223,6 +223,7 @@ session_id,trial_id,input_file,timestamp,activity_truth,terrain_truth,notes
 | src/youbu_annotation/editor.py | 桌面命令入口 |
 | src/youbu_annotation/gui.py | PySide6/pyqtgraph 主窗口 |
 | src/youbu_annotation/trial.py | CSV 校验、采样归一化和显示信号 |
+| src/youbu_annotation/labels.py | 项目级活动与地形类别目录 |
 | src/youbu_annotation/model.py | 边界、确认标记、撤销、QA 和结构校验 |
 | src/youbu_annotation/auto_annotate.py | 离线识别算法与 CLI |
 | src/youbu_annotation/auto_adapter.py | 识别结果到可编辑文档的适配 |
@@ -236,4 +237,4 @@ session_id,trial_id,input_file,timestamp,activity_truth,terrain_truth,notes
 | scripts/install_offline.sh | 目标机无网络安装 |
 | docs/DEPLOYMENT.md | 离线部署说明 |
 
-自动识别方法和桌面技术决策见 docs/adr。首版不支持视频、流式采集、遥测、任意标签模式、多标签页或参考标注对照视图。
+自动识别方法和桌面技术决策见 docs/adr。首版不支持视频、流式采集、遥测、多标签页或参考标注对照视图。

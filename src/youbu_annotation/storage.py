@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .constants import APP_NAME, OUTPUT_FIELDS, REPORT_SCHEMA_VERSION, VERSION
 from .model import AnnotationDocument, ConfirmationKind, Provenance, ReviewIssue, Severity
+from .labels import LabelCatalog, LabelCatalogError
 from .recovery import file_hash
 from .trial import TrialData
 
@@ -127,6 +128,11 @@ class AnnotationRepository:
         if self.target == trial.path:
             raise AnnotationStorageError("标注文件不能覆盖原始试次 CSV")
         self.trial = trial
+        self.catalog_path = self.target.parent / "label_catalog.json"
+        try:
+            self.catalog = LabelCatalog.load(self.catalog_path)
+        except LabelCatalogError as exc:
+            raise AnnotationStorageError(str(exc)) from exc
         self.report_path = report_path_for(self.target)
         self.lock = CooperativeLock(self.target, trial.path)
         if acquire_lock:
@@ -136,6 +142,12 @@ class AnnotationRepository:
         self.expected_report_hash = file_hash(self.report_path)
         self._rows = self._read_rows()
         self._report = self._read_report()
+        try:
+            if self.catalog.discover_rows(self._rows):
+                self.catalog.save(self.catalog_path)
+        except (OSError, ValueError) as exc:
+            self.lock.release()
+            raise AnnotationStorageError(f"无法更新标签目录：{self.catalog_path}") from exc
 
     def close(self) -> None:
         self.lock.release()
@@ -186,7 +198,7 @@ class AnnotationRepository:
         )
         entry = self._report.get("trials", {}).get(self.trial.path.name, {}) if report_valid else {}
         if entry.get("source", {}).get("sha256") == self.trial.source_hash and "document" in entry:
-            return AnnotationDocument.from_dict(self.trial, entry["document"])
+            return AnnotationDocument.from_dict(self.trial, entry["document"], catalog=self.catalog)
 
         issues = []
         if self.report_path.exists():
@@ -197,7 +209,7 @@ class AnnotationRepository:
                     Severity.WARNING,
                 )
             )
-        return AnnotationDocument.from_rows(self.trial, rows, issues)
+        return AnnotationDocument.from_rows(self.trial, rows, issues, catalog=self.catalog)
 
     def _controlled_note(self, event) -> str:
         components = [
@@ -306,6 +318,11 @@ class AnnotationRepository:
         csv_hash = _hash_bytes(csv_content)
         saved_at = datetime.now(timezone.utc).isoformat()
         report_content = self._report_bytes(document, csv_hash, saved_at)
+        self.catalog = document.catalog
+        try:
+            self.catalog.save(self.catalog_path)
+        except OSError as exc:
+            raise AnnotationStorageError(f"标签目录保存失败：{self.catalog_path}") from exc
         self._write_pair(csv_content, report_content)
         self._rows = rows
         self._report = json.loads(report_content.decode("utf-8"))

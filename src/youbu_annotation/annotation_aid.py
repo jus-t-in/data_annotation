@@ -52,7 +52,7 @@ REFERENCE_FIELDS = (
     "notes",
 )
 WORKSHEET_FIELDS = ("input_file", "t_seconds", "activity_truth", "terrain_truth", "notes")
-FILE_RE = re.compile(r"^(P\d+_S\d+)_(T0[1-4])(?:_|\.).*\.csv$", re.I)
+FILE_RE = re.compile(r"^(P\d+_S\d+)_(T\d+)(?:_|\.).*\.csv$", re.I)
 STRIP_SECONDS = 30.0
 STRIPS_PER_PAGE = 6
 

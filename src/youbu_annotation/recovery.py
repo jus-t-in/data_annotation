@@ -9,6 +9,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .labels import LabelCatalog
 from .constants import APP_NAME, VERSION
 from .model import AnnotationDocument
 from .trial import TrialData
@@ -29,13 +30,14 @@ def file_hash(path: Path) -> str | None:
 
 
 class RecoveryStore:
-    def __init__(self, trial: TrialData, target: Path):
+    def __init__(self, trial: TrialData, target: Path, catalog: LabelCatalog | None = None):
         state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
         self.directory = state_home / "youbu-annotation" / "recovery"
         identity = f"{trial.path.resolve()}\0{target.resolve()}".encode()
         self.path = self.directory / f"{hashlib.sha256(identity).hexdigest()}.json"
         self.trial = trial
         self.target = target.resolve()
+        self.catalog = catalog
 
     def save(self, document: AnnotationDocument, target_hash: str | None, report_hash: str | None) -> Path:
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -78,7 +80,7 @@ class RecoveryStore:
         report_path = self.target.with_suffix(".report.json")
         if check_target and target.get("report_sha256") != file_hash(report_path):
             raise RecoveryConflictError("恢复草稿创建后，配套报告已被外部修改")
-        return AnnotationDocument.from_dict(self.trial, payload["document"])
+        return AnnotationDocument.from_dict(self.trial, payload["document"], catalog=self.catalog)
 
     def metadata(self) -> dict | None:
         if not self.path.exists():

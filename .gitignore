@@ -15,6 +15,9 @@ frontend/node_modules/
 *.orig
 
 # Editor and OS temporary files
+.idea/
+.vscode/
+*.log
 .DS_Store
 *.swp
 *.swo
