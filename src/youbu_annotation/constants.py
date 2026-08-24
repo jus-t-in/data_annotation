@@ -20,15 +20,14 @@ ACTIVITY_NAMES = {
     "STILL": "静止",
     "WALKING": "行走",
     "BEND": "弯腰",
-    "SQUAT": "深蹲",
-    "HIGH_KNEE_SINGLE": "单腿高抬",
+    "SQUAT_DESCENT": "下蹲",
+    "SQUAT_HOLD": "蹲姿保持",
+    "SQUAT_ASCENT": "蹲起",
     "HIGH_KNEE_ALTERNATING": "交替高抬腿",
-    "TURNING_LEFT": "左转",
-    "TURNING_RIGHT": "右转",
-    "SHUFFLE": "拖步",
+    "STANDING_ADJUSTMENT": "站立调整",
     "OTHER": "其他动作",
 }
-TERRAIN_NAMES = {"LEVEL": "平地", "ASCENT": "上楼", "DESCENT": "下楼"}
+TERRAIN_NAMES = {"LEVEL": "平地", "ASCENT": "上楼", "DESCENT": "下楼", "INCLINE": "上坡"}
 
 STATE_COLORS = {
     ("STILL", "LEVEL"): "#9E9E9E",
@@ -37,14 +36,16 @@ STATE_COLORS = {
     ("WALKING", "DESCENT"): "#2196F3",
     ("STILL", "ASCENT"): "#FFC107",
     ("STILL", "DESCENT"): "#03A9F4",
+    ("STILL", "INCLINE"): "#6D9E9E",
+    ("WALKING", "INCLINE"): "#00897B",
     ("BEND", "LEVEL"): "#8E44AD",
-    ("SQUAT", "LEVEL"): "#E91E63",
-    ("HIGH_KNEE_SINGLE", "LEVEL"): "#00ACC1",
+    ("SQUAT_DESCENT", "LEVEL"): "#E91E63",
+    ("SQUAT_HOLD", "LEVEL"): "#C2185B",
+    ("SQUAT_ASCENT", "LEVEL"): "#AD1457",
     ("HIGH_KNEE_ALTERNATING", "LEVEL"): "#7CB342",
-    ("TURNING_LEFT", "LEVEL"): "#5C6BC0",
-    ("TURNING_RIGHT", "LEVEL"): "#AB47BC",
-    ("SHUFFLE", "LEVEL"): "#795548",
+    ("STANDING_ADJUSTMENT", "LEVEL"): "#795548",
     ("OTHER", "LEVEL"): "#F44336",
+    ("OTHER", "INCLINE"): "#EF6C00",
 }
 
 LEFT_COLOR = "#D84315"
@@ -57,9 +58,12 @@ IMPACT_COLOR = "#C62828"
 def valid_state(activity: str, terrain: str) -> bool:
     if activity not in ACTIVITY_NAMES or terrain not in TERRAIN_NAMES:
         return False
-    return terrain == "LEVEL" or activity in {"STILL", "WALKING"}
+    if terrain == "LEVEL":
+        return True
+    if terrain in {"ASCENT", "DESCENT"}:
+        return activity in {"STILL", "WALKING"}
+    return activity in {"STILL", "WALKING", "OTHER"}
 
 
 def state_name(activity: str, terrain: str) -> str:
     return f"{ACTIVITY_NAMES.get(activity, activity)}·{TERRAIN_NAMES.get(terrain, terrain)}"
-

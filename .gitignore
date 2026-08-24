@@ -7,3 +7,19 @@ dist/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Frontend dependencies
+frontend/node_modules/
+
+# Local backup files
+*.orig
+
+# Editor and OS temporary files
+.DS_Store
+*.swp
+*.swo
+
+# Local environment files
+.env
+.env.*
+!.env.example

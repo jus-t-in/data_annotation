@@ -67,10 +67,16 @@ class TrialData:
     source_hash: str
 
     @classmethod
-    def load(cls, path: Path) -> "TrialData":
+    def load(
+        cls,
+        path: Path,
+        *,
+        session_id: str | None = None,
+        trial_id: str | None = None,
+    ) -> "TrialData":
         path = path.resolve()
         match = legacy.FILE_RE.match(path.name)
-        if not match:
+        if not match and (not session_id or not trial_id):
             raise TrialValidationError([f"文件名不符合试次协议：{path.name}"])
         try:
             with path.open(encoding="utf-8-sig", newline="") as handle:
@@ -216,8 +222,8 @@ class TrialData:
 
         return cls(
             path=path,
-            session_id=match.group(1).upper(),
-            trial_id=match.group(2).upper(),
+            session_id=(session_id or match.group(1)).strip().upper(),
+            trial_id=(trial_id or match.group(2)).strip().upper(),
             time_column=time_column,
             seconds=seconds,
             timestamps=timestamps,

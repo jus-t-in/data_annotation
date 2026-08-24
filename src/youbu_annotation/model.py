@@ -10,15 +10,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Iterable
 
-from .constants import ACTIVITY_NAMES, TERRAIN_NAMES, valid_state
+from .label_schema import DEFAULT_V2_SCHEMA, LabelSchema, Track
 from .trial import TrialData
 
 EVENT_NAMESPACE = uuid.UUID("882cd0e8-4f5e-4c03-a744-bc31f6ee6a09")
-
-
-class Track(str, Enum):
-    ACTIVITY = "activity"
-    TERRAIN = "terrain"
 
 
 class Provenance(str, Enum):
@@ -182,11 +177,13 @@ class AnnotationDocument:
         confirmations: Iterable[Confirmation] = (),
         issues: Iterable[ReviewIssue] = (),
         *,
+        label_schema: LabelSchema | None = None,
         detail: dict | None = None,
         deleted: list[dict] | None = None,
         reviewed: dict | None = None,
     ):
         self.trial = trial
+        self.label_schema = label_schema or DEFAULT_V2_SCHEMA
         self.boundaries = list(boundaries)
         self.confirmations = list(confirmations)
         self.issues = list(issues)
@@ -206,14 +203,17 @@ class AnnotationDocument:
         rows: list[dict],
         issues: Iterable[ReviewIssue] = (),
         *,
+        label_schema: LabelSchema | None = None,
         detail: dict | None = None,
     ) -> "AnnotationDocument":
+        label_schema = label_schema or DEFAULT_V2_SCHEMA
         if not rows:
+            activity, terrain = label_schema.default_state()
             initial = [
-                Boundary(Track.ACTIVITY, 0, "STILL", Provenance.AUTO),
-                Boundary(Track.TERRAIN, 0, "LEVEL", Provenance.AUTO),
+                Boundary(Track.ACTIVITY, 0, activity, Provenance.AUTO),
+                Boundary(Track.TERRAIN, 0, terrain, Provenance.AUTO),
             ]
-            return cls(trial, initial, issues=issues, detail=detail)
+            return cls(trial, initial, issues=issues, label_schema=label_schema, detail=detail)
         located = []
         imported_issues = list(issues)
         for row in rows:
@@ -309,7 +309,14 @@ class AnnotationDocument:
                         )
                     )
             previous = state
-        return cls(trial, boundaries, confirmations, imported_issues, detail=detail)
+        return cls(
+            trial,
+            boundaries,
+            confirmations,
+            imported_issues,
+            label_schema=label_schema,
+            detail=detail,
+        )
 
     def _state_dict(self) -> dict:
         return {
@@ -322,17 +329,30 @@ class AnnotationDocument:
 
     def to_dict(self) -> dict:
         result = self._state_dict()
+        result["label_schema"] = self.label_schema.to_dict()
         result["detail"] = copy.deepcopy(self.detail)
         result["baseline"] = copy.deepcopy(self.baseline)
         return result
 
     @classmethod
-    def from_dict(cls, trial: TrialData, value: dict) -> "AnnotationDocument":
+    def from_dict(
+        cls,
+        trial: TrialData,
+        value: dict,
+        *,
+        label_schema: LabelSchema | None = None,
+    ) -> "AnnotationDocument":
+        schema = label_schema or (
+            LabelSchema.from_dict(value["label_schema"])
+            if "label_schema" in value
+            else DEFAULT_V2_SCHEMA
+        )
         document = cls(
             trial,
             [Boundary.from_dict(item) for item in value["boundaries"]],
             [Confirmation.from_dict(item) for item in value.get("confirmations", [])],
             [ReviewIssue.from_dict(item) for item in value.get("issues", [])],
+            label_schema=schema,
             detail=value.get("detail"),
             deleted=value.get("deleted"),
             reviewed=value.get("reviewed"),
@@ -486,7 +506,7 @@ class AnnotationDocument:
             if any(not 0 <= item.sample_index < sample_count for item in items):
                 errors.append(f"{track.value} 存在越界边界")
         for event in self.composed_events():
-            if not valid_state(event.activity, event.terrain):
+            if not self.label_schema.allows(event.activity, event.terrain):
                 errors.append(f"{self.trial.timestamp(event.sample_index)} 的组合状态非法")
         occupied = {item.sample_index for item in self.boundaries}
         if len({item.sample_index for item in self.confirmations}) != len(self.confirmations):
@@ -519,8 +539,7 @@ class AnnotationDocument:
         if sum(item.kind is ConfirmationKind.TRIAL_END for item in self.confirmations) > 1:
             errors.append("试次存在多个收尾确认")
         for item in self.boundaries:
-            allowed = ACTIVITY_NAMES if item.track is Track.ACTIVITY else TERRAIN_NAMES
-            if item.value not in allowed:
+            if not self.label_schema.has_label(item.track, item.value):
                 errors.append(f"未知标签：{item.value}")
             if len(item.user_note) > 500 or any(ord(char) < 32 for char in item.user_note):
                 errors.append("边界备注含控制字符或超过 500 字")
@@ -572,8 +591,7 @@ class AnnotationDocument:
 
     def set_boundary_value(self, boundary_id: str, value: str) -> None:
         item = self.find_boundary(boundary_id)
-        allowed = ACTIVITY_NAMES if item.track is Track.ACTIVITY else TERRAIN_NAMES
-        if value not in allowed:
+        if not self.label_schema.has_label(item.track, value, active_only=True):
             raise ValueError(f"未知标签：{value}")
         self._checkpoint()
         item.value = value
@@ -595,8 +613,7 @@ class AnnotationDocument:
         self.dirty = self._state_dict() != self.baseline
 
     def add_boundary(self, track: Track, sample_index: int, value: str) -> Boundary:
-        allowed = ACTIVITY_NAMES if track is Track.ACTIVITY else TERRAIN_NAMES
-        if value not in allowed:
+        if not self.label_schema.has_label(track, value, active_only=True):
             raise ValueError(f"未知标签：{value}")
         if not 0 <= sample_index < len(self.trial.seconds):
             raise ValueError("边界时刻超出试次范围")
@@ -607,8 +624,7 @@ class AnnotationDocument:
         return item
 
     def add_interval(self, track: Track, start: int, end: int, value: str) -> None:
-        allowed = ACTIVITY_NAMES if track is Track.ACTIVITY else TERRAIN_NAMES
-        if value not in allowed:
+        if not self.label_schema.has_label(track, value, active_only=True):
             raise ValueError(f"未知标签：{value}")
         if not 0 < start < end < len(self.trial.seconds):
             raise ValueError("区间必须位于试次内部并至少跨越一个采样间隔")
@@ -688,6 +704,8 @@ class AnnotationDocument:
         """Replace the current draft as one undoable recognition action."""
         if generated.trial.source_hash != self.trial.source_hash:
             raise ValueError("自动识别结果不属于当前试次")
+        if generated.label_schema.content_hash != self.label_schema.content_hash:
+            raise ValueError("自动识别结果使用了不同的标签模式")
         self._checkpoint()
         self.boundaries = copy.deepcopy(generated.boundaries)
         self.confirmations = copy.deepcopy(generated.confirmations)

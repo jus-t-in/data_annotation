@@ -22,7 +22,12 @@ def recognize(trial: TrialData) -> AnnotationDocument:
         trial.channels,
         left_column,
     )
-    events, detail = legacy.annotate_file(trial.path, signal)
+    events, detail = legacy.annotate_file(
+        trial.path,
+        signal,
+        session_id=trial.session_id,
+        trial_id=trial.trial_id,
+    )
     flags = legacy.qa_check(trial.trial_id, events, detail)
     issues = [
         ReviewIssue(

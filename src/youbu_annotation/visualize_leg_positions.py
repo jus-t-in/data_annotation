@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from youbu_annotation.constants import ACTIVITY_NAMES, STATE_COLORS, TERRAIN_NAMES
+
 try:
     import matplotlib
 
@@ -33,36 +35,6 @@ ELAPSED_COLUMN = "Elapsed (s)"    # 7.27 起的导出格式：试次内相对秒
 RIGHT_COLUMN = "左右腿位置/右腿位置"
 LEFT_COLUMN = "左右腿位置/左右位置"
 LEFT_COLUMN_ALT = "左右腿位置/左腿位置"  # 7.27 起的列名；语义同 LEFT_COLUMN
-
-ACTIVITY_NAMES = {
-    "STILL": "静止",
-    "WALKING": "行走",
-    "BEND": "弯腰",
-    "SQUAT": "深蹲",
-    "HIGH_KNEE_SINGLE": "单腿高抬",
-    "HIGH_KNEE_ALTERNATING": "交替高抬腿",
-    "TURNING_LEFT": "左转",
-    "TURNING_RIGHT": "右转",
-    "SHUFFLE": "拖步",
-    "OTHER": "协议外动作",
-}
-TERRAIN_NAMES = {"LEVEL": "平地", "ASCENT": "上楼", "DESCENT": "下楼"}
-STATE_COLORS = {
-    ("STILL", "LEVEL"): "#9E9E9E",
-    ("WALKING", "LEVEL"): "#4CAF50",
-    ("WALKING", "ASCENT"): "#FF9800",
-    ("WALKING", "DESCENT"): "#2196F3",
-    ("STILL", "ASCENT"): "#FFC107",
-    ("STILL", "DESCENT"): "#03A9F4",
-    ("BEND", "LEVEL"): "#8E44AD",
-    ("SQUAT", "LEVEL"): "#E91E63",
-    ("HIGH_KNEE_SINGLE", "LEVEL"): "#00ACC1",
-    ("HIGH_KNEE_ALTERNATING", "LEVEL"): "#7CB342",
-    ("TURNING_LEFT", "LEVEL"): "#5C6BC0",
-    ("TURNING_RIGHT", "LEVEL"): "#AB47BC",
-    ("SHUFFLE", "LEVEL"): "#795548",
-    ("OTHER", "LEVEL"): "#F44336",
-}
 
 
 @dataclass(frozen=True)
