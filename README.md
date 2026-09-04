@@ -16,7 +16,7 @@
 - Ubuntu/Debian 桌面 Linux，建议 Python 3.12；Python 支持范围为 3.10-3.13。
 - 运行依赖：PySide6、pyqtgraph、NumPy、SciPy 和 Matplotlib。
 - 中文图表建议安装 Noto Sans CJK SC。
-- 不需要网络服务或数据库。
+- 不需要网络服务或外部数据库服务；标注项目使用本地 SQLite。
 
 ## 从 GitHub 部署
 

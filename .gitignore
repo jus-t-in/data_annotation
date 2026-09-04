@@ -13,6 +13,23 @@ frontend/node_modules/
 
 # Local backup files
 *.orig
+*.bak
+
+# Local annotation data and generated state
+.local-data/
+*.csv
+!tests/fixtures/
+!tests/fixtures/**/*.csv
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.report.json
+.youbu-project.lock
+*.csv.lock
+*.csv.transaction.json
 
 # Editor and OS temporary files
 .idea/
