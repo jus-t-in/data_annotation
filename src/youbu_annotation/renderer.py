@@ -46,6 +46,7 @@ def _event_text(document: AnnotationDocument, event: ComposedEvent) -> str:
     kind = {
         "initial": "起始",
         "boundary": "边界",
+        "stitch_initial": "接缝初始化",
         ConfirmationKind.STAIR_SECOND_STEP.value: "第二步确认",
         ConfirmationKind.TRIAL_END.value: "收尾确认",
     }[event.kind]

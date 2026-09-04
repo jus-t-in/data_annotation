@@ -30,7 +30,22 @@ ACTIVITY_NAMES = {
     "STANDING_ADJUSTMENT": "站立调整",
     "OTHER": "其他动作",
 }
-TERRAIN_NAMES = {"LEVEL": "平地", "ASCENT": "上楼", "DESCENT": "下楼", "INCLINE": "上坡"}
+V2_TERRAIN_NAMES = {
+    "LEVEL": "平地",
+    "ASCENT": "上楼/上坡",
+    "DESCENT": "下楼/下坡",
+    "INCLINE": "上坡",
+}
+V3_TERRAIN_NAMES = {
+    "LEVEL": "平地",
+    "ASCENT": "上楼",
+    "DESCENT": "下楼",
+    "INCLINE": "上坡",
+    "DECLINE": "下坡",
+}
+# Public names include the V3 label.  V2 callers should use V2_TERRAIN_NAMES
+# (or the versioned schema) when enumerating legal labels.
+TERRAIN_NAMES = V3_TERRAIN_NAMES
 
 STATE_COLORS = {
     ("STILL", "LEVEL"): "#9E9E9E",
@@ -49,6 +64,13 @@ STATE_COLORS = {
     ("STANDING_ADJUSTMENT", "LEVEL"): "#795548",
     ("OTHER", "LEVEL"): "#F44336",
     ("OTHER", "INCLINE"): "#EF6C00",
+    ("STILL", "DECLINE"): "#546E7A",
+    ("WALKING", "DECLINE"): "#3949AB",
+    ("STANDING_ADJUSTMENT", "ASCENT"): "#8D6E63",
+    ("STANDING_ADJUSTMENT", "DESCENT"): "#6D4C41",
+    ("STANDING_ADJUSTMENT", "INCLINE"): "#5D8A8A",
+    ("STANDING_ADJUSTMENT", "DECLINE"): "#455A64",
+    ("OTHER", "DECLINE"): "#C62828",
 }
 
 LEFT_COLOR = "#D84315"
@@ -56,7 +78,13 @@ RIGHT_COLOR = "#1565C0"
 PITCH_COLOR = "#616161"
 MOTION_COLOR = "#2E7D32"
 IMPACT_COLOR = "#C62828"
-TERRAIN_COLORS = {"LEVEL": "#83918B", "ASCENT": "#BD7A3B", "DESCENT": "#527B94"}
+TERRAIN_COLORS = {
+    "LEVEL": "#83918B",
+    "ASCENT": "#BD7A3B",
+    "DESCENT": "#527B94",
+    "INCLINE": "#4F8A80",
+    "DECLINE": "#7B5876",
+}
 _COLOR_SCOPE_OFFSETS = {"state": 0.0, "terrain": 0.5, "activity": 0.25}
 _RESERVED_COLORS = tuple({*STATE_COLORS.values(), *TERRAIN_COLORS.values()})
 
@@ -92,7 +120,7 @@ def state_color(activity: str, terrain: str) -> str:
 
 
 def valid_state(activity: str, terrain: str, catalog=None) -> bool:
-    if catalog is None and (activity not in ACTIVITY_NAMES or terrain not in TERRAIN_NAMES):
+    if catalog is None and (activity not in ACTIVITY_NAMES or terrain not in V2_TERRAIN_NAMES):
         return False
     if catalog is not None and (not catalog.contains("activity", activity) or not catalog.contains("terrain", terrain)):
         return False
@@ -101,6 +129,14 @@ def valid_state(activity: str, terrain: str, catalog=None) -> bool:
     if terrain in {"ASCENT", "DESCENT"}:
         return activity in {"STILL", "WALKING"}
     return activity in {"STILL", "WALKING", "OTHER"} or catalog is not None
+
+
+def valid_v3_state(activity: str, terrain: str) -> bool:
+    """Return whether a V3 activity/terrain composite is legal."""
+    return activity in ACTIVITY_NAMES and terrain in V3_TERRAIN_NAMES and (
+        terrain == "LEVEL"
+        or activity in {"STILL", "WALKING", "STANDING_ADJUSTMENT", "OTHER"}
+    )
 
 
 def state_name(activity: str, terrain: str, catalog=None) -> str:

@@ -8,9 +8,9 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .constants import ACTIVITY_NAMES, TERRAIN_NAMES
+from .constants import ACTIVITY_NAMES, V2_TERRAIN_NAMES
 
-_BUILTIN_TERRAIN_NAMES = {name: label for name, label in TERRAIN_NAMES.items() if name != "INCLINE"}
+_BUILTIN_TERRAIN_NAMES = {name: label for name, label in V2_TERRAIN_NAMES.items() if name != "INCLINE"}
 
 
 class LabelCatalogError(RuntimeError):

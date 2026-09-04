@@ -8,7 +8,17 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Iterable
 
-from .constants import ACTIVITY_NAMES, STATE_COLORS, TERRAIN_NAMES, valid_state
+from .constants import (
+    ACTIVITY_NAMES,
+    STATE_COLORS,
+    TERRAIN_NAMES,
+    V2_TERRAIN_NAMES,
+    V3_TERRAIN_NAMES,
+    label_color,
+    state_color,
+    valid_state,
+    valid_v3_state,
+)
 
 DEFAULT_COLOR = "#607D8B"
 
@@ -219,22 +229,49 @@ def _default_v2_schema() -> LabelSchema:
         for code in ACTIVITY_NAMES
     }
     terrain_colors = {
-        code: STATE_COLORS.get(("WALKING", code), STATE_COLORS.get(("STILL", code), DEFAULT_COLOR))
-        for code in TERRAIN_NAMES
+        code: label_color("terrain", code)
+        for code in V2_TERRAIN_NAMES
     }
     states = tuple(
         StateDefinition(activity, terrain, STATE_COLORS.get((activity, terrain), DEFAULT_COLOR))
         for activity in ACTIVITY_NAMES
-        for terrain in TERRAIN_NAMES
+        for terrain in V2_TERRAIN_NAMES
         if valid_state(activity, terrain)
     )
     return LabelSchema(
         schema_id="youbu-v2",
         version=1,
         activity_labels=_label_definitions(ACTIVITY_NAMES, activity_colors),
-        terrain_labels=_label_definitions(TERRAIN_NAMES, terrain_colors),
+        terrain_labels=_label_definitions(V2_TERRAIN_NAMES, terrain_colors),
         states=states,
     )
 
 
 DEFAULT_V2_SCHEMA = _default_v2_schema()
+
+
+def _default_v3_schema() -> LabelSchema:
+    activity_colors = {
+        code: label_color("activity", code)
+        for code in ACTIVITY_NAMES
+    }
+    terrain_colors = {
+        code: label_color("terrain", code)
+        for code in V3_TERRAIN_NAMES
+    }
+    states = tuple(
+        StateDefinition(activity, terrain, state_color(activity, terrain))
+        for activity in ACTIVITY_NAMES
+        for terrain in V3_TERRAIN_NAMES
+        if valid_v3_state(activity, terrain)
+    )
+    return LabelSchema(
+        schema_id="youbu-v3",
+        version=1,
+        activity_labels=_label_definitions(ACTIVITY_NAMES, activity_colors),
+        terrain_labels=_label_definitions(V3_TERRAIN_NAMES, terrain_colors),
+        states=states,
+    )
+
+
+DEFAULT_V3_SCHEMA = _default_v3_schema()

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .constants import APP_NAME, OUTPUT_FIELDS, REPORT_SCHEMA_VERSION, VERSION
+from .label_schema import DEFAULT_V2_SCHEMA, DEFAULT_V3_SCHEMA
 from .model import AnnotationDocument, ConfirmationKind, Provenance, ReviewIssue, Severity
 from .labels import LabelCatalog, LabelCatalogError
 from .recovery import file_hash
@@ -143,7 +144,7 @@ class AnnotationRepository:
         self._rows = self._read_rows()
         self._report = self._read_report()
         try:
-            if self.catalog.discover_rows(self._rows):
+            if not self.trial.is_v3 and self.catalog.discover_rows(self._rows):
                 self.catalog.save(self.catalog_path)
         except (OSError, ValueError) as exc:
             self.lock.release()
@@ -209,7 +210,14 @@ class AnnotationRepository:
                     Severity.WARNING,
                 )
             )
-        return AnnotationDocument.from_rows(self.trial, rows, issues, catalog=self.catalog)
+        schema = DEFAULT_V3_SCHEMA if self.trial.is_v3 else DEFAULT_V2_SCHEMA
+        return AnnotationDocument.from_rows(
+            self.trial,
+            rows,
+            issues,
+            label_schema=schema,
+            catalog=self.catalog,
+        )
 
     def _controlled_note(self, event) -> str:
         components = [
@@ -233,6 +241,7 @@ class AnnotationRepository:
         kind = {
             "initial": "文件开头状态",
             "boundary": "组合状态边界",
+            "stitch_initial": "接缝初始化事件",
             ConfirmationKind.STAIR_SECOND_STEP.value: "楼梯第二步确认",
             ConfirmationKind.TRIAL_END.value: "试次收尾确认",
         }[event.kind]
@@ -283,6 +292,7 @@ class AnnotationRepository:
         )
         trials = report.setdefault("trials", {})
         trials[self.trial.path.name] = {
+            "file": self.trial.file_info.to_dict(),
             "source": {
                 "path": str(self.trial.path),
                 "sha256": self.trial.source_hash,
@@ -291,6 +301,11 @@ class AnnotationRepository:
                 "gaps": [vars(gap) for gap in self.trial.gaps],
             },
             "saved_at": saved_at,
+            "audit": copy.deepcopy(document.detail.get("audit", {})),
+            "suggestion": copy.deepcopy(document.detail.get("suggestion")),
+            "legacy_qa": copy.deepcopy(document.detail.get("legacy_qa", [])),
+            "gap_contract": copy.deepcopy(document.detail.get("gap_contract", {})),
+            "batch_note": document.detail.get("batch_note", ""),
             "document": document_data,
             "events": [
                 {
@@ -307,6 +322,8 @@ class AnnotationRepository:
         return (json.dumps(report, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
     def save(self, document: AnnotationDocument) -> None:
+        if document.is_read_only or self.trial.is_read_only:
+            raise AnnotationStorageError("源记录为只读，不能正式保存")
         if not document.ready_to_save:
             raise AnnotationStorageError("标注尚未满足正式保存条件")
         if file_hash(self.target) != self.expected_target_hash:

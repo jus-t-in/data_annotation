@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import math
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +33,143 @@ class DataGap:
     @property
     def duration(self) -> float:
         return self.end - self.start
+
+
+@dataclass(frozen=True)
+class TrialFileInfo:
+    """Protocol role inferred from the exact input filename contract."""
+
+    filename: str
+    mode: str
+    role: str
+    session_id: str | None = None
+    trial_id: str | None = None
+    part: str | None = None
+    reason: str = ""
+
+    @property
+    def is_v2(self) -> bool:
+        return self.mode == "v2"
+
+    @property
+    def is_v3(self) -> bool:
+        return self.mode == "v3"
+
+    @property
+    def is_formal(self) -> bool:
+        return self.role == "formal"
+
+    @property
+    def is_source(self) -> bool:
+        return self.role == "source"
+
+    @property
+    def supported(self) -> bool:
+        return self.role in {"formal", "source"}
+
+    @property
+    def editable(self) -> bool:
+        return self.is_formal
+
+    @property
+    def is_formal_v3(self) -> bool:
+        return self.is_v3 and self.is_formal
+
+    @property
+    def is_read_only(self) -> bool:
+        return self.is_source or self.role == "unsupported"
+
+    @property
+    def is_merged(self) -> bool:
+        return self.is_v3 and self.trial_id == "T04" and self.part == "1+2"
+
+    @property
+    def expected_video_count(self) -> int:
+        if not self.is_v3 or not self.is_formal:
+            return 0
+        return 2 if self.is_merged else 1
+
+    def to_dict(self) -> dict:
+        return {
+            "filename": self.filename,
+            "mode": self.mode,
+            "role": self.role,
+            "session_id": self.session_id,
+            "trial_id": self.trial_id,
+            "part": self.part,
+            "reason": self.reason,
+            "read_only": self.is_read_only,
+            "supported": self.supported,
+            "editable": self.editable,
+            "expected_video_count": self.expected_video_count,
+        }
+
+
+_V3_FILE_RE = re.compile(
+    r"^(?P<session>P\d+_S\d+)_(?P<trial>T0[1-5])_v3(?:_(?P<part>1\+2|1|2))?\.csv$",
+    re.IGNORECASE,
+)
+
+
+def identify_trial_file(filename: str | Path) -> TrialFileInfo:
+    name = Path(filename).name
+    match = _V3_FILE_RE.fullmatch(name)
+    if match:
+        session_id = match.group("session").upper()
+        trial_id = match.group("trial").upper()
+        part = match.group("part")
+        if trial_id == "T04" and part == "1+2":
+            role = "formal"
+        elif trial_id == "T04" and part in {"1", "2"}:
+            role = "source"
+        elif trial_id == "T04":
+            role = "unsupported"
+        elif part is None:
+            role = "formal"
+        else:
+            role = "unsupported"
+        return TrialFileInfo(name, "v3", role, session_id, trial_id, part)
+
+    legacy_match = legacy.FILE_RE.match(name)
+    if legacy_match and "_v3" not in name.casefold():
+        return TrialFileInfo(
+            name,
+            "v2",
+            "formal",
+            legacy_match.group(1).upper(),
+            legacy_match.group(2).upper(),
+        )
+    reason = "V3 文件名不符合标准角色后缀" if "_v3" in name.casefold() else "无法从文件名判断协议版本"
+    return TrialFileInfo(name, "unknown", "unknown", reason=reason)
+
+
+identify_file_role = identify_trial_file
+
+
+@dataclass(frozen=True)
+class GapContract:
+    data_gaps: tuple[DataGap, ...]
+    stitch_gap: DataGap | None
+    errors: tuple[str, ...] = ()
+
+    @property
+    def gaps(self) -> tuple[DataGap, ...]:
+        return self.data_gaps
+
+    @property
+    def valid(self) -> bool:
+        return not self.errors
+
+    def to_dict(self) -> dict:
+        return {
+            "data_gaps": [vars(gap) for gap in self.data_gaps],
+            "stitch_gap": vars(self.stitch_gap) if self.stitch_gap else None,
+            "errors": list(self.errors),
+            "valid": self.valid,
+        }
+
+
+InputGapContract = GapContract
 
 
 def sha256_file(path: Path) -> str:
@@ -258,6 +396,84 @@ class TrialData:
 
     def timestamp(self, index: int) -> str:
         return self.timestamps[int(index)]
+
+    @property
+    def file_info(self) -> TrialFileInfo:
+        return identify_trial_file(self.path.name)
+
+    @property
+    def annotation_mode(self) -> str:
+        return self.file_info.mode
+
+    @property
+    def is_v3(self) -> bool:
+        return self.file_info.is_v3
+
+    @property
+    def is_read_only(self) -> bool:
+        return self.file_info.is_read_only
+
+    @property
+    def is_editable(self) -> bool:
+        return self.file_info.editable
+
+    @property
+    def is_formal_v3(self) -> bool:
+        return self.file_info.is_v3 and self.file_info.is_formal
+
+    @property
+    def is_t04_merged(self) -> bool:
+        return self.file_info.is_merged
+
+    @property
+    def stitch_gap(self) -> DataGap | None:
+        if not self.is_t04_merged:
+            return None
+        return self.gaps[0] if len(self.gaps) == 1 else next(
+            (gap for gap in self.gaps if abs(gap.duration - 3.0) <= 0.001),
+            None,
+        )
+
+    @property
+    def has_legal_stitch(self) -> bool:
+        return self.gap_contract().valid and self.stitch_gap is not None
+
+    @property
+    def stitch_sample_index(self) -> int | None:
+        return self.stitch_gap.after_index if self.has_legal_stitch and self.stitch_gap else None
+
+    def gap_contract(self) -> GapContract:
+        gaps = tuple(self.gaps)
+        info = self.file_info
+        errors: list[str] = []
+        stitch_gap = self.stitch_gap
+        if info.is_v3:
+            if info.is_merged:
+                if len(gaps) != 1:
+                    errors.append("T04 合并文件必须且只能有一个接缝断档")
+                elif abs(gaps[0].duration - 3.0) > 0.001:
+                    errors.append("T04 接缝断档必须为 3.000 s ± 0.001 s")
+            elif gaps:
+                errors.append("V3 正式/源文件存在未声明数据断档")
+        return GapContract(gaps, stitch_gap, tuple(errors))
+
+    def time_display(self, index: int) -> dict[str, float | str | None]:
+        index = int(index)
+        merged = float(self.seconds[index])
+        result: dict[str, float | str | None] = {"merged_seconds": merged}
+        if not self.is_t04_merged or self.stitch_gap is None:
+            result["source_seconds"] = merged
+            return result
+        gap = self.stitch_gap
+        if merged <= gap.start:
+            result.update({"source_video": "1", "source1_seconds": merged, "source2_seconds": None})
+        elif merged >= gap.end:
+            result.update({"source_video": "2", "source1_seconds": None, "source2_seconds": merged - gap.end})
+        else:
+            result.update({"source_video": None, "source1_seconds": None, "source2_seconds": None})
+        return result
+
+    video_time = time_display
 
     def inside_gap(self, seconds: float) -> bool:
         return any(gap.start < seconds < gap.end for gap in self.gaps)

@@ -13,6 +13,7 @@ from PySide6 import QtCore, QtGui, QtTest, QtWidgets
 
 from youbu_annotation.constants import label_color, state_color
 from youbu_annotation.gui import AnnotationEditor, EventLabel
+from youbu_annotation.label_schema import DEFAULT_V3_SCHEMA
 from youbu_annotation.model import AnnotationDocument, Boundary, Confirmation, ConfirmationKind, Provenance, Track
 from youbu_annotation.trial import TrialData
 
@@ -67,6 +68,27 @@ def document(trial: TrialData) -> AnnotationDocument:
 
 
 @pytest.fixture
+def v3_trial(trial: TrialData) -> TrialData:
+    trial.path = Path("P01_S01_T03_v3.csv")
+    trial.trial_id = "T03"
+    return trial
+
+
+@pytest.fixture
+def v3_document(v3_trial: TrialData) -> AnnotationDocument:
+    return AnnotationDocument(
+        v3_trial,
+        [
+            Boundary(Track.ACTIVITY, 0, "STILL", Provenance.AUTO),
+            Boundary(Track.TERRAIN, 0, "LEVEL", Provenance.AUTO),
+            Boundary(Track.ACTIVITY, 2, "WALKING", Provenance.AUTO),
+            Boundary(Track.TERRAIN, 2, "ASCENT", Provenance.AUTO),
+        ],
+        label_schema=DEFAULT_V3_SCHEMA,
+    )
+
+
+@pytest.fixture
 def editor(application, tmp_path: Path, trial: TrialData, document: AnnotationDocument):
     QtCore.QSettings.setDefaultFormat(QtCore.QSettings.Format.IniFormat)
     QtCore.QSettings.setPath(QtCore.QSettings.Format.IniFormat, QtCore.QSettings.Scope.UserScope, str(tmp_path))
@@ -75,6 +97,22 @@ def editor(application, tmp_path: Path, trial: TrialData, document: AnnotationDo
     settings.sync()
     window = AnnotationEditor()
     window.load_session(trial, document)
+    window.show()
+    application.processEvents()
+    yield window
+    window.close()
+    application.processEvents()
+
+
+@pytest.fixture
+def v3_editor(application, tmp_path: Path, v3_trial: TrialData, v3_document: AnnotationDocument):
+    QtCore.QSettings.setDefaultFormat(QtCore.QSettings.Format.IniFormat)
+    QtCore.QSettings.setPath(QtCore.QSettings.Format.IniFormat, QtCore.QSettings.Scope.UserScope, str(tmp_path))
+    settings = QtCore.QSettings("Youbu", "AnnotationEditor")
+    settings.clear()
+    settings.sync()
+    window = AnnotationEditor()
+    window.load_session(v3_trial, v3_document)
     window.show()
     application.processEvents()
     yield window
@@ -107,6 +145,16 @@ def test_empty_state_transitions_to_loaded_workspace(
     finally:
         window._dispose_session()
         window.close()
+
+
+def test_desktop_uses_boundary_creation_only(editor: AnnotationEditor) -> None:
+    assert not hasattr(editor, "interval_start")
+    assert not hasattr(editor, "interval_end")
+    assert not hasattr(editor, "interval_track_combo")
+    assert not any(
+        button.text() == "添加区间"
+        for button in editor.findChildren(QtWidgets.QPushButton)
+    )
 
 
 def test_toolbar_groups_actions_and_emphasizes_save(editor: AnnotationEditor) -> None:
@@ -185,6 +233,14 @@ def test_main_annotations_select_events(editor: AnnotationEditor, application) -
     assert len(labels) == len(editor.document.composed_events())
     assert len(regions) == len(editor.document.intervals())
     assert all("来源：" in label.toolTip() for label in labels)
+    fixed = [item for item in labels if not item.draggable]
+    assert len(fixed) == 1
+    assert fixed[0].cursor().shape() is QtCore.Qt.CursorShape.ForbiddenCursor
+    assert all(
+        item.cursor().shape() is QtCore.Qt.CursorShape.SizeHorCursor
+        for item in labels
+        if item.draggable
+    )
 
     target = labels[-1]
     component = next(
@@ -195,6 +251,139 @@ def test_main_annotations_select_events(editor: AnnotationEditor, application) -
 
     assert editor.selected_component_id == component.id
     assert editor.cursor_index == component.sample_index
+
+
+def test_main_annotation_drag_previews_and_commits_one_snapped_move(
+    editor: AnnotationEditor,
+    application,
+) -> None:
+    assert editor.document is not None
+    callout = next(item for item in editor._event_callouts.values() if item.event.sample_index == 2)
+    component = editor.document.find_boundary(callout.event.component_ids[0])
+    undo_count = len(editor.document._undo)
+    target = editor.annotation_plot.vb.mapViewToScene(QtCore.QPointF(0.55, callout.lane_y))
+
+    callout.label.drag_started.emit(component.id)
+    callout.label.dragged.emit(component.id, target)
+    application.processEvents()
+
+    assert callout.label.pos().x() == pytest.approx(0.55)
+    assert callout.connector.xData.tolist() == pytest.approx([0.55, 0.55])
+    assert callout.line.value() == pytest.approx(0.55)
+    assert editor._markers[component.id].value() == pytest.approx(0.55)
+    assert component.sample_index == 2
+
+    callout.label.drag_finished.emit(component.id, target)
+    application.processEvents()
+
+    assert component.sample_index == 1
+    assert component.provenance is Provenance.ADJUSTED
+    assert len(editor.document._undo) == undo_count + 1
+    assert editor.cursor_index == 1
+    assert editor.selected_component_id == component.id
+    editor.document.dirty = False
+
+
+def test_main_annotation_accepts_click_and_drag_gestures(
+    editor: AnnotationEditor,
+    application,
+) -> None:
+    assert editor.document is not None
+    viewport = editor.graphics.viewport()
+    callout = next(item for item in editor._event_callouts.values() if item.event.sample_index == 2)
+    component = editor.document.find_boundary(callout.event.component_ids[0])
+    center = callout.label.mapToScene(callout.label.boundingRect().center())
+    start = editor.graphics.mapFromScene(center)
+
+    QtTest.QTest.mouseClick(viewport, QtCore.Qt.MouseButton.LeftButton, pos=start)
+    application.processEvents()
+    assert editor.selected_component_id == component.id
+    assert component.sample_index == 2
+
+    callout = editor._event_callouts[component.id]
+    center = callout.label.mapToScene(callout.label.boundingRect().center())
+    start = editor.graphics.mapFromScene(center)
+    target = editor.annotation_plot.vb.mapViewToScene(QtCore.QPointF(0.5, callout.lane_y))
+    end = editor.graphics.mapFromScene(target)
+    QtTest.QTest.mousePress(viewport, QtCore.Qt.MouseButton.LeftButton, pos=start)
+    QtTest.QTest.mouseMove(viewport, end, delay=20)
+    QtTest.QTest.mouseRelease(viewport, QtCore.Qt.MouseButton.LeftButton, pos=end)
+    application.processEvents()
+
+    assert component.sample_index == 1
+    editor.document.dirty = False
+
+
+def test_v3_terrain_is_default_component_and_all_labels_are_editable(
+    v3_editor: AnnotationEditor,
+    application,
+) -> None:
+    assert v3_editor.document is not None
+    expected = ["平地", "上楼", "下楼", "上坡", "下坡"]
+    assert [
+        v3_editor.new_terrain_combo.itemText(index)
+        for index in range(v3_editor.new_terrain_combo.count())
+    ] == expected
+
+    event = next(item for item in v3_editor.document.composed_events() if item.sample_index == 2)
+    row = next(
+        index
+        for index in range(v3_editor.event_table.rowCount())
+        if v3_editor.event_table.item(index, 0).data(QtCore.Qt.ItemDataRole.UserRole) == event.id
+    )
+    v3_editor.event_table.selectRow(row)
+    application.processEvents()
+
+    terrain = next(
+        item
+        for item in v3_editor.document.boundaries
+        if item.track is Track.TERRAIN and item.sample_index == 2
+    )
+    activity = next(
+        item
+        for item in v3_editor.document.boundaries
+        if item.track is Track.ACTIVITY and item.sample_index == 2
+    )
+    assert v3_editor.selected_component_id == terrain.id
+    assert v3_editor.value_label.text() == "地形标签"
+    assert [
+        v3_editor.value_combo.itemText(index)
+        for index in range(v3_editor.value_combo.count())
+    ] == expected
+
+    v3_editor._marker_clicked(activity.id)
+    application.processEvents()
+    assert v3_editor.selected_component_id == activity.id
+    assert v3_editor.value_label.text() == "活动标签"
+
+
+def test_v3_adding_terrain_boundary_keeps_activity_track_unchanged(
+    v3_editor: AnnotationEditor,
+    application,
+) -> None:
+    assert v3_editor.document is not None
+    activity_before = [
+        (item.sample_index, item.value)
+        for item in v3_editor.document.track_boundaries(Track.ACTIVITY)
+    ]
+    v3_editor._set_cursor(4)
+    v3_editor.new_terrain_combo.setCurrentIndex(v3_editor.new_terrain_combo.findData("DECLINE"))
+    v3_editor.add_terrain_button.click()
+    application.processEvents()
+
+    terrain = next(item for item in v3_editor.document.boundaries if item.value == "DECLINE")
+    assert terrain.track is Track.TERRAIN
+    assert terrain.sample_index == 4
+    assert v3_editor.selected_component_id == terrain.id
+    assert v3_editor.value_label.text() == "地形标签"
+    assert [
+        item.sample_index for item in v3_editor.document.track_boundaries(Track.ACTIVITY)
+    ] == [item[0] for item in activity_before]
+    assert [
+        item.value for item in v3_editor.document.track_boundaries(Track.ACTIVITY)
+    ] == [item[1] for item in activity_before]
+    assert v3_editor.document.state_at(4) == ("WALKING", "DECLINE")
+    v3_editor.document.dirty = False
 
 
 def test_custom_label_colors_reach_editor_overlays(editor: AnnotationEditor, application) -> None:

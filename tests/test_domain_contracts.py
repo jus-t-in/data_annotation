@@ -9,6 +9,7 @@ import pytest
 from youbu_annotation.constants import OUTPUT_FIELDS
 from youbu_annotation.label_schema import (
     DEFAULT_V2_SCHEMA,
+    DEFAULT_V3_SCHEMA,
     LabelDefinition,
     LabelSchema,
     StateDefinition,
@@ -61,13 +62,18 @@ def custom_schema(*, custom_active: bool = True) -> LabelSchema:
     )
 
 
-def test_default_v2_schema_preserves_existing_label_contract() -> None:
+def test_default_schemas_keep_versioned_terrain_display_names() -> None:
     assert DEFAULT_V2_SCHEMA.has_label(Track.ACTIVITY, "STILL", active_only=True)
     assert DEFAULT_V2_SCHEMA.has_label(Track.TERRAIN, "INCLINE", active_only=True)
     assert DEFAULT_V2_SCHEMA.allows("WALKING", "INCLINE")
     assert not DEFAULT_V2_SCHEMA.allows("BEND", "INCLINE")
-    assert DEFAULT_V2_SCHEMA.state_name("WALKING", "ASCENT") == "行走·上楼"
+    assert DEFAULT_V2_SCHEMA.state_name("WALKING", "ASCENT") == "行走·上楼/上坡"
+    assert DEFAULT_V2_SCHEMA.state_name("WALKING", "DESCENT") == "行走·下楼/下坡"
     assert DEFAULT_V2_SCHEMA.state_color("WALKING", "ASCENT") == "#FF9800"
+    assert DEFAULT_V3_SCHEMA.state_name("WALKING", "ASCENT") == "行走·上楼"
+    assert DEFAULT_V3_SCHEMA.state_name("WALKING", "DESCENT") == "行走·下楼"
+    assert DEFAULT_V3_SCHEMA.state_name("WALKING", "INCLINE") == "行走·上坡"
+    assert DEFAULT_V3_SCHEMA.state_name("WALKING", "DECLINE") == "行走·下坡"
 
 
 def test_custom_schema_round_trip_preserves_display_properties_and_hash() -> None:
@@ -114,6 +120,32 @@ def test_document_composes_events_and_undoes_one_domain_command() -> None:
     assert document.state_at(2) == ("WALKING", "LEVEL")
     assert document.redo()
     assert document.state_at(2) == ("WALKING", "ASCENT")
+
+
+def test_moving_composed_event_uses_shared_bounds_and_keeps_components_together() -> None:
+    trial = make_trial()
+    document = AnnotationDocument(
+        trial,
+        [
+            Boundary(Track.ACTIVITY, 0, "STILL", Provenance.AUTO),
+            Boundary(Track.TERRAIN, 0, "LEVEL", Provenance.AUTO),
+            Boundary(Track.ACTIVITY, 2, "WALKING", Provenance.AUTO),
+            Boundary(Track.TERRAIN, 2, "ASCENT", Provenance.AUTO),
+            Boundary(Track.TERRAIN, 3, "LEVEL", Provenance.AUTO),
+            Boundary(Track.ACTIVITY, 4, "STILL", Provenance.AUTO),
+        ],
+    )
+    event = next(item for item in document.composed_events() if item.sample_index == 2)
+
+    assert document.event_move_bounds(event) == (1, 2)
+    document.move_event(event, 4)
+    assert len(document._undo) == 0
+
+    document.move_event(event, 1)
+    assert {document.find_boundary(item_id).sample_index for item_id in event.component_ids} == {1}
+    assert len(document._undo) == 1
+    assert document.undo()
+    assert {document.find_boundary(item_id).sample_index for item_id in event.component_ids} == {2}
 
 
 def test_document_requires_closed_qa_and_attestation_before_save() -> None:

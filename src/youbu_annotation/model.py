@@ -8,10 +8,11 @@ import json
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Iterable
 
 from .constants import valid_state
-from .label_schema import DEFAULT_V2_SCHEMA, LabelSchema, Track
+from .label_schema import DEFAULT_V2_SCHEMA, DEFAULT_V3_SCHEMA, LabelSchema, Track
 from .labels import LabelCatalog
 from .trial import TrialData
 
@@ -46,6 +47,11 @@ class Boundary:
     original: dict | None = None
     evidence: dict = field(default_factory=dict)
     parent_ids: list[str] = field(default_factory=list)
+    event_kind: str = "boundary"
+
+    @property
+    def is_stitch_initial(self) -> bool:
+        return self.event_kind == "stitch_initial"
 
     def to_dict(self) -> dict:
         result = copy.deepcopy(vars(self))
@@ -187,16 +193,19 @@ class AnnotationDocument:
     ):
         self.catalog = catalog or LabelCatalog.default()
         self.trial = trial
-        self.label_schema = label_schema or DEFAULT_V2_SCHEMA
+        self.label_schema = label_schema or (
+            DEFAULT_V3_SCHEMA if getattr(trial, "is_v3", False) else DEFAULT_V2_SCHEMA
+        )
         self.boundaries = list(boundaries)
         self.confirmations = list(confirmations)
         self.issues = list(issues)
         self.detail = detail or {}
         self.deleted = deleted or []
         self.reviewed = reviewed
-        for item in self.boundaries:
-            if not self.catalog.contains(item.track.value, item.value):
-                self.catalog.add(item.track.value, item.value)
+        if not getattr(trial, "is_v3", False):
+            for item in self.boundaries:
+                if not self.catalog.contains(item.track.value, item.value):
+                    self.catalog.add(item.track.value, item.value)
         self.dirty = False
         self._undo: list[dict] = []
         self._redo: list[dict] = []
@@ -225,16 +234,23 @@ class AnnotationDocument:
         detail: dict | None = None,
         catalog: LabelCatalog | None = None,
     ) -> "AnnotationDocument":
-        label_schema = label_schema or DEFAULT_V2_SCHEMA
+        label_schema = label_schema or (
+            DEFAULT_V3_SCHEMA if getattr(trial, "is_v3", False) else DEFAULT_V2_SCHEMA
+        )
         catalog = catalog or LabelCatalog.default()
-        catalog.discover_rows(rows)
+        if not getattr(trial, "is_v3", False):
+            catalog.discover_rows(rows)
         if not rows:
             activity, terrain = label_schema.default_state()
             initial = [
                 Boundary(Track.ACTIVITY, 0, activity, Provenance.AUTO),
                 Boundary(Track.TERRAIN, 0, terrain, Provenance.AUTO),
             ]
-            return cls(trial, initial, issues=issues, label_schema=label_schema, detail=detail, catalog=catalog)
+            document = cls(trial, initial, issues=issues, label_schema=label_schema, detail=detail, catalog=catalog)
+            document.ensure_stitch_initial_event(checkpoint=False)
+            document.baseline = document._state_dict()
+            document.dirty = False
+            return document
         located = []
         imported_issues = list(issues)
         for row in rows:
@@ -287,6 +303,31 @@ class AnnotationDocument:
                         ),
                     )
                 )
+            elif getattr(trial, "stitch_sample_index", None) == index:
+                boundaries.extend(
+                    (
+                        Boundary(
+                            Track.ACTIVITY,
+                            index,
+                            activity,
+                            provenance,
+                            user_note,
+                            id=stable_component_id(trial, index, "stitch_activity", position),
+                            original=original,
+                            event_kind="stitch_initial",
+                        ),
+                        Boundary(
+                            Track.TERRAIN,
+                            index,
+                            terrain,
+                            provenance,
+                            user_note,
+                            id=stable_component_id(trial, index, "stitch_terrain", position),
+                            original=original,
+                            event_kind="stitch_initial",
+                        ),
+                    )
+                )
             elif state == previous:
                 kind = confirmation_kind(row.get("notes", ""), activity, terrain)
                 if kind is None:
@@ -330,7 +371,7 @@ class AnnotationDocument:
                         )
                     )
             previous = state
-        return cls(
+        document = cls(
             trial,
             boundaries,
             confirmations,
@@ -339,6 +380,10 @@ class AnnotationDocument:
             detail=detail,
             catalog=catalog,
         )
+        document.ensure_stitch_initial_event(checkpoint=False)
+        document.baseline = document._state_dict()
+        document.dirty = False
+        return document
 
     def _state_dict(self) -> dict:
         return {
@@ -347,6 +392,7 @@ class AnnotationDocument:
             "issues": [item.to_dict() for item in self.issues],
             "deleted": copy.deepcopy(self.deleted),
             "reviewed": copy.deepcopy(self.reviewed),
+            "detail": copy.deepcopy(self.detail),
         }
 
     def to_dict(self) -> dict:
@@ -368,7 +414,7 @@ class AnnotationDocument:
         schema = label_schema or (
             LabelSchema.from_dict(value["label_schema"])
             if "label_schema" in value
-            else DEFAULT_V2_SCHEMA
+            else (DEFAULT_V3_SCHEMA if getattr(trial, "is_v3", False) else DEFAULT_V2_SCHEMA)
         )
         document = cls(
             trial,
@@ -382,6 +428,7 @@ class AnnotationDocument:
             catalog=catalog,
         )
         document.baseline = copy.deepcopy(value.get("baseline", document._state_dict()))
+        document.baseline.setdefault("detail", copy.deepcopy(document.detail))
         document.dirty = document._state_dict() != document.baseline
         return document
 
@@ -428,12 +475,121 @@ class AnnotationDocument:
                     kept
                     and kept[-1].sample_index != item.sample_index
                     and kept[-1].value == item.value
+                    and not kept[-1].is_stitch_initial
+                    and not item.is_stitch_initial
                 ):
                     continue
                 kept.append(item)
             self.boundaries = [item for item in self.boundaries if item.track != track] + kept
         self.boundaries.sort(key=lambda item: (item.sample_index, item.track.value))
         self.confirmations.sort(key=lambda item: item.sample_index)
+
+    @property
+    def is_v3(self) -> bool:
+        return bool(getattr(self.trial, "is_v3", False))
+
+    @property
+    def is_formal_v3(self) -> bool:
+        return bool(getattr(self.trial, "is_formal_v3", False))
+
+    @property
+    def is_read_only(self) -> bool:
+        return bool(getattr(self.trial, "is_read_only", False))
+
+    @property
+    def is_v2_suggestion(self) -> bool:
+        suggestion = self.detail.get("suggestion") or {}
+        return suggestion.get("source") == "v2"
+
+    @property
+    def required_video_count(self) -> int:
+        return int(getattr(getattr(self.trial, "file_info", None), "expected_video_count", 0))
+
+    @property
+    def video_files(self) -> tuple[str, ...]:
+        audit = self.detail.get("audit", {})
+        value = audit.get("video_files", self.detail.get("video_files", ()))
+        return tuple(str(item) for item in value if str(item).strip())
+
+    def audit_errors(self) -> list[str]:
+        if not self.is_formal_v3:
+            return []
+        files = self.video_files
+        errors = []
+        if len(files) != self.required_video_count:
+            errors.append(f"正式 V3 试次必须填写 {self.required_video_count} 个审核视频文件名")
+        if len(set(files)) != len(files):
+            errors.append("审核视频文件名不能重复")
+        for name in files:
+            if name != name.strip() or name != Path(name).name:
+                errors.append("审核视频字段必须是文件名，不能包含路径")
+            if any(ord(char) < 32 for char in name):
+                errors.append("审核视频文件名不能包含控制字符")
+        return list(dict.fromkeys(errors))
+
+    def set_video_files(self, files: Iterable[str]) -> None:
+        self._assert_editable()
+        values = [str(item).strip() for item in files]
+        if len(values) > self.required_video_count:
+            raise ValueError("审核视频文件名数量超出当前试次要求")
+        if any(not value for value in values):
+            raise ValueError("审核视频文件名不能为空")
+        if any(any(ord(char) < 32 for char in value) for value in values):
+            raise ValueError("审核视频文件名不能包含控制字符")
+        if len(set(values)) != len(values):
+            raise ValueError("审核视频文件名不能重复")
+        if any(Path(value).name != value for value in values):
+            raise ValueError("审核视频字段必须是文件名，不能包含路径")
+        self._checkpoint()
+        self.detail.setdefault("audit", {})["video_files"] = values
+        self.dirty = self._state_dict() != self.baseline
+
+    def _assert_editable(self) -> None:
+        if self.is_read_only:
+            raise ValueError("源记录为只读，不能修改")
+
+    def ensure_stitch_initial_event(self, *, checkpoint: bool = True) -> bool:
+        stitch_index = getattr(self.trial, "stitch_sample_index", None)
+        if stitch_index is None:
+            return False
+        if any(item.is_stitch_initial for item in self.boundaries):
+            return False
+        if checkpoint:
+            self._assert_editable()
+            self._checkpoint()
+        existing = {
+            item.track: item
+            for item in self.boundaries
+            if item.sample_index == stitch_index
+        }
+        activity, terrain = existing.get(Track.ACTIVITY), existing.get(Track.TERRAIN)
+        if activity is None:
+            activity = Boundary(
+                Track.ACTIVITY,
+                stitch_index,
+                "STILL",
+                Provenance.AUTO,
+                id=stable_component_id(self.trial, stitch_index, "stitch_activity"),
+                event_kind="stitch_initial",
+            )
+            self.boundaries.append(activity)
+        else:
+            activity.event_kind = "stitch_initial"
+        if terrain is None:
+            terrain = Boundary(
+                Track.TERRAIN,
+                stitch_index,
+                "LEVEL",
+                Provenance.AUTO,
+                id=stable_component_id(self.trial, stitch_index, "stitch_terrain"),
+                event_kind="stitch_initial",
+            )
+            self.boundaries.append(terrain)
+        else:
+            terrain.event_kind = "stitch_initial"
+        self._normalize()
+        self.dirty = self._state_dict() != self.baseline
+        return True
 
     def track_boundaries(self, track: Track) -> list[Boundary]:
         return [item for item in self.boundaries if item.track is track]
@@ -480,11 +636,18 @@ class AnnotationDocument:
                 uuid.uuid5(EVENT_NAMESPACE, "|".join(component_ids))
             )
             activity, terrain = self.state_at(index)
+            kind = (
+                "stitch_initial"
+                if any(item.is_stitch_initial for item in items)
+                else "initial"
+                if index == 0
+                else "boundary"
+            )
             result.append(
                 ComposedEvent(
                     event_id,
                     index,
-                    "initial" if index == 0 else "boundary",
+                    kind,
                     activity,
                     terrain,
                     self._combined_provenance(items),
@@ -509,7 +672,11 @@ class AnnotationDocument:
         return sorted(result, key=lambda item: (item.sample_index, 0 if item.kind in {"initial", "boundary"} else 1))
 
     def intervals(self) -> list[tuple[int, int, str, str]]:
-        state_events = [item for item in self.composed_events() if item.kind in {"initial", "boundary"}]
+        state_events = [
+            item
+            for item in self.composed_events()
+            if item.kind in {"initial", "boundary", "stitch_initial"}
+        ]
         result = []
         for index, event in enumerate(state_events):
             end = state_events[index + 1].sample_index if index + 1 < len(state_events) else len(self.trial.seconds) - 1
@@ -519,13 +686,35 @@ class AnnotationDocument:
     def structural_errors(self) -> list[str]:
         errors = []
         sample_count = len(self.trial.seconds)
+        stitch_index = getattr(self.trial, "stitch_sample_index", None)
+        stitch_items = [item for item in self.boundaries if item.is_stitch_initial]
+        if self.is_formal_v3 and getattr(self.trial, "is_t04_merged", False):
+            gap_contract = self.trial.gap_contract()
+            errors.extend(gap_contract.errors)
+            if gap_contract.valid and (
+                len(stitch_items) != 2
+                or {item.track for item in stitch_items} != set(Track)
+                or any(item.sample_index != stitch_index for item in stitch_items)
+            ):
+                errors.append("T04 合并文件缺少完整的固定接缝初始化事件")
+        elif stitch_items:
+            errors.append("接缝初始化事件只能出现在合法的 T04 合并文件中")
         for track in Track:
             items = sorted(self.track_boundaries(track), key=lambda item: item.sample_index)
             if not items or items[0].sample_index != 0:
                 errors.append(f"{track.value} 缺少首采样点起始状态")
             if len({item.sample_index for item in items}) != len(items):
                 errors.append(f"{track.value} 同一采样点存在冲突边界")
-            if any(a.value == b.value for a, b in zip(items, items[1:])):
+            if any(
+                a.value == b.value
+                and not (
+                    b.is_stitch_initial
+                    and stitch_index is not None
+                    and b.sample_index == stitch_index
+                    and len(stitch_items) == 2
+                )
+                for a, b in zip(items, items[1:])
+            ):
                 errors.append(f"{track.value} 存在相邻同标签边界")
             if any(not 0 <= item.sample_index < sample_count for item in items):
                 errors.append(f"{track.value} 存在越界边界")
@@ -567,6 +756,8 @@ class AnnotationDocument:
                 errors.append(f"未知标签：{item.value}")
             if len(item.user_note) > 500 or any(ord(char) < 32 for char in item.user_note):
                 errors.append("边界备注含控制字符或超过 500 字")
+        if self.is_v3 and not (self.is_formal_v3 and getattr(self.trial, "is_t04_merged", False)):
+            errors.extend(self.trial.gap_contract().errors)
         return list(dict.fromkeys(errors))
 
     def _changed(self) -> None:
@@ -575,7 +766,10 @@ class AnnotationDocument:
         self.dirty = self._state_dict() != self.baseline
 
     def move_boundary(self, boundary_id: str, sample_index: int) -> None:
+        self._assert_editable()
         item = self.find_boundary(boundary_id)
+        if item.is_stitch_initial:
+            raise ValueError("接缝初始化事件时刻固定不可移动")
         if item.sample_index == 0:
             raise ValueError("起始状态时刻不可移动")
         peers = sorted(self.track_boundaries(item.track), key=lambda value: value.sample_index)
@@ -588,32 +782,59 @@ class AnnotationDocument:
             item.provenance = Provenance.ADJUSTED
         self._changed()
 
-    def move_event(self, event: ComposedEvent, sample_index: int) -> None:
-        components = [self.find_boundary(item_id) for item_id in event.component_ids if any(
-            boundary.id == item_id for boundary in self.boundaries
-        )]
+    def event_move_bounds(self, event: ComposedEvent) -> tuple[int, int]:
+        if event.kind == "stitch_initial" or any(
+            self.find_boundary(item_id).is_stitch_initial
+            for item_id in event.component_ids
+            if any(boundary.id == item_id for boundary in self.boundaries)
+        ):
+            raise ValueError("接缝初始化事件时刻固定不可移动")
+        component_ids = set(event.component_ids)
+        components = [item for item in self.boundaries if item.id in component_ids]
         if not components:
-            confirmation = next(item for item in self.confirmations if item.id == event.id)
-            self._checkpoint()
-            confirmation.sample_index = max(0, min(len(self.trial.seconds) - 1, int(sample_index)))
-            if confirmation.provenance is not Provenance.MANUAL:
-                confirmation.provenance = Provenance.ADJUSTED
-            self._changed()
-            return
+            return 0, len(self.trial.seconds) - 1
         if any(item.sample_index == 0 for item in components):
             raise ValueError("起始状态时刻不可移动")
-        self._checkpoint()
+        bounds = []
         for item in components:
             peers = sorted(self.track_boundaries(item.track), key=lambda value: value.sample_index)
             position = peers.index(item)
             low = peers[position - 1].sample_index + 1
-            high = peers[position + 1].sample_index - 1 if position + 1 < len(peers) else len(self.trial.seconds) - 1
-            item.sample_index = max(low, min(high, int(sample_index)))
+            high = (
+                peers[position + 1].sample_index - 1
+                if position + 1 < len(peers)
+                else len(self.trial.seconds) - 1
+            )
+            bounds.append((low, high))
+        return max(low for low, _high in bounds), min(high for _low, high in bounds)
+
+    def move_event(self, event: ComposedEvent, sample_index: int) -> None:
+        self._assert_editable()
+        component_ids = set(event.component_ids)
+        components = [item for item in self.boundaries if item.id in component_ids]
+        low, high = self.event_move_bounds(event)
+        target = max(low, min(high, int(sample_index)))
+        if not components:
+            confirmation = next(item for item in self.confirmations if item.id == event.id)
+            if confirmation.sample_index == target:
+                return
+            self._checkpoint()
+            confirmation.sample_index = target
+            if confirmation.provenance is not Provenance.MANUAL:
+                confirmation.provenance = Provenance.ADJUSTED
+            self._changed()
+            return
+        if all(item.sample_index == target for item in components):
+            return
+        self._checkpoint()
+        for item in components:
+            item.sample_index = target
             if item.provenance is not Provenance.MANUAL:
                 item.provenance = Provenance.ADJUSTED
         self._changed()
 
     def set_boundary_value(self, boundary_id: str, value: str) -> None:
+        self._assert_editable()
         item = self.find_boundary(boundary_id)
         if not self._has_label(item.track, value, active_only=True):
             raise ValueError(f"未知标签：{value}")
@@ -624,6 +845,7 @@ class AnnotationDocument:
         self._changed()
 
     def set_note(self, component_id: str, note: str) -> None:
+        self._assert_editable()
         if len(note) > 500 or any(ord(char) < 32 for char in note):
             raise ValueError("备注必须为不超过 500 字的单行文本")
         item = next(
@@ -637,6 +859,7 @@ class AnnotationDocument:
         self.dirty = self._state_dict() != self.baseline
 
     def add_boundary(self, track: Track, sample_index: int, value: str) -> Boundary:
+        self._assert_editable()
         if not self._has_label(track, value, active_only=True):
             raise ValueError(f"未知标签：{value}")
         if not 0 <= sample_index < len(self.trial.seconds):
@@ -648,6 +871,7 @@ class AnnotationDocument:
         return item
 
     def add_interval(self, track: Track, start: int, end: int, value: str) -> None:
+        self._assert_editable()
         if not self._has_label(track, value, active_only=True):
             raise ValueError(f"未知标签：{value}")
         if not 0 < start < end < len(self.trial.seconds):
@@ -663,7 +887,10 @@ class AnnotationDocument:
         self._changed()
 
     def delete_boundary(self, boundary_id: str, reason: str) -> None:
+        self._assert_editable()
         item = self.find_boundary(boundary_id)
+        if item.is_stitch_initial:
+            raise ValueError("接缝初始化事件固定不可删除")
         if item.sample_index == 0:
             raise ValueError("起始状态不可删除")
         if item.provenance is Provenance.AUTO and not reason.strip():
@@ -675,6 +902,7 @@ class AnnotationDocument:
         self._changed()
 
     def add_confirmation(self, kind: ConfirmationKind, sample_index: int) -> Confirmation:
+        self._assert_editable()
         if not 0 <= sample_index < len(self.trial.seconds):
             raise ValueError("确认标记时刻超出试次范围")
         self._checkpoint()
@@ -684,6 +912,7 @@ class AnnotationDocument:
         return item
 
     def delete_confirmation(self, confirmation_id: str, reason: str) -> None:
+        self._assert_editable()
         item = next(value for value in self.confirmations if value.id == confirmation_id)
         if item.provenance is Provenance.AUTO and not reason.strip():
             raise ValueError("删除自动确认标记必须填写理由")
@@ -694,6 +923,7 @@ class AnnotationDocument:
         self._changed()
 
     def resolve_issue(self, issue_id: str, resolution: str, reason: str = "") -> None:
+        self._assert_editable()
         issue = next(item for item in self.issues if item.id == issue_id)
         if resolution not in {"fixed", "accepted"}:
             raise ValueError("未知 QA 处理结论")
@@ -705,10 +935,13 @@ class AnnotationDocument:
         self.dirty = self._state_dict() != self.baseline
 
     def attest(self, annotator_id: str, timestamp: str) -> None:
+        self._assert_editable()
         if self.structural_errors():
             raise ValueError("结构错误未修复，不能声明已复核")
         if any(not issue.resolved for issue in self.issues):
             raise ValueError("QA 复核项未闭环，不能声明已复核")
+        if self.audit_errors():
+            raise ValueError("审核视频信息未填写完整，不能声明已复核")
         if not annotator_id.strip():
             raise ValueError("必须填写标注员 ID")
         if not timestamp.strip():
@@ -718,6 +951,7 @@ class AnnotationDocument:
         self.dirty = self._state_dict() != self.baseline
 
     def clear_attestation(self) -> None:
+        self._assert_editable()
         if self.reviewed is None:
             return
         self._checkpoint()
@@ -726,6 +960,7 @@ class AnnotationDocument:
 
     def replace_with(self, generated: "AnnotationDocument") -> None:
         """Replace the current draft as one undoable recognition action."""
+        self._assert_editable()
         if generated.trial.source_hash != self.trial.source_hash:
             raise ValueError("自动识别结果不属于当前试次")
         if generated.label_schema.content_hash != self.label_schema.content_hash:
@@ -745,7 +980,13 @@ class AnnotationDocument:
 
     @property
     def ready_to_save(self) -> bool:
-        return not self.structural_errors() and all(issue.resolved for issue in self.issues) and self.reviewed is not None
+        return (
+            not self.is_read_only
+            and not self.structural_errors()
+            and not self.audit_errors()
+            and all(issue.resolved for issue in self.issues)
+            and self.reviewed is not None
+        )
 
     def statistics(self) -> dict:
         durations: dict[str, float] = {}

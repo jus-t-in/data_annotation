@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import traceback
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -20,7 +21,7 @@ from .constants import (
     MOTION_COLOR,
     PITCH_COLOR,
     RIGHT_COLOR,
-    TERRAIN_NAMES,
+    V2_TERRAIN_NAMES,
     VERSION,
     label_color,
     state_color,
@@ -29,6 +30,7 @@ from .constants import (
 from .model import (
     AnnotationDocument,
     Boundary,
+    ComposedEvent,
     Confirmation,
     ConfirmationKind,
     Provenance,
@@ -45,6 +47,7 @@ from .trial import TrialData, TrialValidationError
 KIND_NAMES = {
     "initial": "起始",
     "boundary": "边界",
+    "stitch_initial": "接缝初始化",
     ConfirmationKind.STAIR_SECOND_STEP.value: "第二步确认",
     ConfirmationKind.TRIAL_END.value: "收尾确认",
 }
@@ -58,19 +61,60 @@ SOURCE_NAMES = {
 
 class EventLabel(pg.TextItem):
     clicked = QtCore.Signal(str)
+    drag_started = QtCore.Signal(str)
+    dragged = QtCore.Signal(str, object)
+    drag_finished = QtCore.Signal(str, object)
 
-    def __init__(self, component_id: str, *args, **kwargs):
+    def __init__(self, component_id: str, *args, draggable: bool = True, **kwargs):
         super().__init__(*args, **kwargs)
         self.component_id = component_id
+        self.draggable = draggable
+        self._press_screen_pos = None
+        self._dragging = False
         self.setAcceptedMouseButtons(QtCore.Qt.MouseButton.LeftButton)
-        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.setCursor(
+            QtCore.Qt.CursorShape.SizeHorCursor if draggable else QtCore.Qt.CursorShape.ForbiddenCursor
+        )
 
     def mousePressEvent(self, event) -> None:
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
-            self.clicked.emit(self.component_id)
+            self._press_screen_pos = event.screenPos()
+            self._dragging = False
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._press_screen_pos is None or not self.draggable:
+            event.accept()
+            return
+        if not self._dragging and (event.screenPos() - self._press_screen_pos).manhattanLength() > 4:
+            self._dragging = True
+            self.drag_started.emit(self.component_id)
+        if self._dragging:
+            self.dragged.emit(self.component_id, event.scenePos())
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() != QtCore.Qt.MouseButton.LeftButton or self._press_screen_pos is None:
+            super().mouseReleaseEvent(event)
+            return
+        if self._dragging:
+            self.drag_finished.emit(self.component_id, event.scenePos())
+        else:
+            self.clicked.emit(self.component_id)
+        self._press_screen_pos = None
+        self._dragging = False
+        event.accept()
+
+
+@dataclass
+class EventCallout:
+    event: ComposedEvent
+    label: EventLabel
+    connector: pg.PlotDataItem
+    line: pg.InfiniteLine
+    lane_y: float
 
 
 class TaskSignals(QtCore.QObject):
@@ -112,14 +156,13 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.cursor_index = 0
         self.selected_event_id: str | None = None
         self.selected_component_id: str | None = None
-        self.interval_start: int | None = None
-        self.interval_end: int | None = None
         self._refreshing = False
         self._syncing_range = False
         self._syncing_cursor = False
         self._busy = False
         self._state_items: list[object] = []
         self._main_annotation_items: list[object] = []
+        self._event_callouts: dict[str, EventCallout] = {}
         self._markers: dict[str, pg.InfiniteLine] = {}
         self._cursor_lines: list[tuple[pg.PlotItem, pg.InfiniteLine]] = []
         self._raw_curves: list[pg.PlotDataItem] = []
@@ -206,6 +249,15 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             self.delete_action,
             self.labels_action,
         ]
+        self.editable_actions = [
+            self.target_action,
+            self.save_action,
+            self.undo_action,
+            self.redo_action,
+            self.recognize_action,
+            self.delete_action,
+            self.labels_action,
+        ]
 
     def _build_ui(self) -> None:
         root = QtWidgets.QWidget()
@@ -227,6 +279,9 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.target_label.setObjectName("targetLabel")
         self.target_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         self.target_label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
+        self.mode_badge = QtWidgets.QLabel("未载入")
+        self.mode_badge.setObjectName("modeBadge")
+        self.mode_badge.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.review_badge = QtWidgets.QLabel("未载入")
         self.review_badge.setObjectName("reviewBadge")
         self.review_badge.setProperty("status", "empty")
@@ -245,11 +300,12 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         header_separator.setObjectName("headerSeparator")
         header_separator.setFixedWidth(1)
         header_layout.addWidget(self.source_label, 0, 0)
-        header_layout.addWidget(self.review_badge, 0, 1, 2, 1, QtCore.Qt.AlignmentFlag.AlignRight)
+        header_layout.addWidget(self.mode_badge, 0, 1, 2, 1, QtCore.Qt.AlignmentFlag.AlignRight)
+        header_layout.addWidget(self.review_badge, 0, 2, 2, 1, QtCore.Qt.AlignmentFlag.AlignRight)
         header_layout.addWidget(self.target_label, 1, 0)
-        header_layout.addWidget(header_separator, 0, 2, 2, 1)
-        header_layout.addWidget(self.raw_checkbox, 0, 3, 2, 1)
-        header_layout.addWidget(self.auxiliary_button, 0, 4, 2, 1)
+        header_layout.addWidget(header_separator, 0, 3, 2, 1)
+        header_layout.addWidget(self.raw_checkbox, 0, 4, 2, 1)
+        header_layout.addWidget(self.auxiliary_button, 0, 5, 2, 1)
         header_layout.setColumnStretch(0, 1)
         root_layout.addWidget(header)
 
@@ -406,6 +462,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         time_layout.addWidget(self.previous_sample_button)
         time_layout.addWidget(self.time_spin, 1)
         time_layout.addWidget(self.next_sample_button)
+        self.value_label = QtWidgets.QLabel("标签")
         self.value_combo = QtWidgets.QComboBox()
         self.note_edit = QtWidgets.QLineEdit()
         self.note_edit.setMaxLength(500)
@@ -417,7 +474,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         selected_form.addRow("真实时刻", self.timestamp_label)
         selected_form.addRow("事件分量", self.component_combo)
         selected_form.addRow("相对时刻", time_row)
-        selected_form.addRow("标签", self.value_combo)
+        selected_form.addRow(self.value_label, self.value_combo)
         selected_form.addRow("判断依据", self.note_edit)
         selected_form.addRow("采样证据", self.evidence_label)
         selected_form.addRow(self.delete_button)
@@ -455,26 +512,6 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         create_form.addRow("活动", activity_row)
         create_form.addRow("地形", terrain_row)
         create_form.addRow("确认", confirmation_row)
-
-        interval_row = QtWidgets.QWidget()
-        interval_layout = QtWidgets.QGridLayout(interval_row)
-        interval_layout.setContentsMargins(0, 0, 0, 0)
-        self.interval_track_combo = QtWidgets.QComboBox()
-        self.interval_track_combo.addItem("活动", Track.ACTIVITY)
-        self.interval_track_combo.addItem("地形", Track.TERRAIN)
-        self.interval_value_combo = QtWidgets.QComboBox()
-        self.interval_start_button = QtWidgets.QPushButton("设为开始")
-        self.interval_end_button = QtWidgets.QPushButton("设为结束")
-        self.interval_add_button = QtWidgets.QPushButton("添加区间")
-        self.interval_range_label = QtWidgets.QLabel("未设置")
-        self.interval_range_label.setObjectName("intervalValue")
-        interval_layout.addWidget(self.interval_track_combo, 0, 0)
-        interval_layout.addWidget(self.interval_value_combo, 0, 1, 1, 2)
-        interval_layout.addWidget(self.interval_start_button, 1, 0)
-        interval_layout.addWidget(self.interval_end_button, 1, 1)
-        interval_layout.addWidget(self.interval_add_button, 1, 2)
-        interval_layout.addWidget(self.interval_range_label, 2, 0, 1, 3)
-        create_form.addRow("区间", interval_row)
         layout.addWidget(create)
 
         qa = QtWidgets.QGroupBox("QA 复核")
@@ -498,12 +535,20 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         review_form = QtWidgets.QFormLayout(review)
         self._configure_form(review_form)
         self.annotator_edit = QtWidgets.QLineEdit(str(self.settings.value("annotator_id", "")))
+        self.video_label_1 = QtWidgets.QLabel("审核视频 1")
+        self.video_edit_1 = QtWidgets.QLineEdit()
+        self.video_edit_1.setPlaceholderText("填写审核视频文件名")
+        self.video_label_2 = QtWidgets.QLabel("审核视频 2")
+        self.video_edit_2 = QtWidgets.QLineEdit()
+        self.video_edit_2.setPlaceholderText("T04 合并记录需要第二个视频")
         self.review_checkbox = QtWidgets.QCheckBox("我已检查完整时间线")
         self.validation_label = QtWidgets.QLabel("-")
         self.validation_label.setWordWrap(True)
         self.validation_label.setObjectName("validation")
         self.validation_label.setProperty("status", "neutral")
         review_form.addRow("标注员 ID", self.annotator_edit)
+        review_form.addRow(self.video_label_1, self.video_edit_1)
+        review_form.addRow(self.video_label_2, self.video_edit_2)
         review_form.addRow(self.review_checkbox)
         review_form.addRow(self.validation_label)
         layout.addWidget(review)
@@ -536,20 +581,60 @@ class AnnotationEditor(QtWidgets.QMainWindow):
 
     def _label_combo(self, track: Track) -> QtWidgets.QComboBox:
         combo = QtWidgets.QComboBox()
-        for value, display, _enabled in self.catalog.entries(track):
+        for value, display, _enabled in self._label_entries(track):
             combo.addItem(display, value)
         return combo
+
+    def _label_entries(
+        self,
+        track: Track,
+        *,
+        include: tuple[str, ...] = (),
+    ) -> list[tuple[str, str, bool]]:
+        if self.document is None or not self.document.is_v3:
+            return self.catalog.entries(track, include=include)
+        included = set(include)
+        result = []
+        for label in self.document.label_schema.labels(track, include_inactive=True):
+            if label.active or label.code in included:
+                result.append((label.code, label.display_name, label.active))
+        for value in included:
+            if not any(code == value for code, _display, _enabled in result):
+                result.append((value, value, False))
+        return result
+
+    def _set_mode_badge(self, trial: TrialData | None) -> None:
+        if trial is None:
+            self.mode_badge.setText("未载入")
+            self._set_dynamic_property(self.mode_badge, "v3", "false")
+            self._set_dynamic_property(self.mode_badge, "readonly", "false")
+            return
+        info = trial.file_info
+        if info.is_v3 and info.is_source:
+            text = "V3 源记录（只读）"
+        elif info.is_v3 and info.is_formal:
+            text = "V3 模式"
+        elif info.is_v2:
+            text = "V2 模式"
+        else:
+            text = "协议版本未知（只读）"
+        self.mode_badge.setText(text)
+        self._set_dynamic_property(self.mode_badge, "v3", str(info.is_v3).lower())
+        self._set_dynamic_property(
+            self.mode_badge,
+            "readonly",
+            str(info.is_read_only or not info.supported).lower(),
+        )
 
     def _refresh_label_combos(self) -> None:
         for combo, track in ((self.new_activity_combo, Track.ACTIVITY), (self.new_terrain_combo, Track.TERRAIN)):
             current = combo.currentData()
             combo.blockSignals(True)
             combo.clear()
-            for value, display, _enabled in self.catalog.entries(track):
+            for value, display, _enabled in self._label_entries(track):
                 combo.addItem(display, value)
             combo.setCurrentIndex(max(0, combo.findData(current)))
             combo.blockSignals(False)
-        self._update_interval_values()
 
     def _configure_plots(self) -> None:
         self.overview_plot.setMenuEnabled(False)
@@ -633,6 +718,17 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             QLabel#reviewBadge[status="neutral"] { color: #56625d; background: #f0f3f1; border-color: #c4cdc8; }
             QLabel#reviewBadge[status="ready"] { color: #225f56; background: #eaf5f1; border-color: #a9cec3; }
             QLabel#reviewBadge[status="saved"] { color: #315f69; background: #ebf3f5; border-color: #abc8ce; }
+            QLabel#modeBadge {
+                padding: 4px 9px;
+                border: 1px solid #c4cdc8;
+                border-radius: 4px;
+                background: #f0f3f1;
+                color: #56625d;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QLabel#modeBadge[v3="true"] { color: #225f56; background: #eaf5f1; border-color: #a9cec3; }
+            QLabel#modeBadge[readonly="true"] { color: #855b20; background: #fff8e8; border-color: #e5cd9f; }
 
             QWidget#emptyState { background: #eef2f0; }
             QLabel#emptyTitle { color: #17231e; font-size: 22px; font-weight: 600; }
@@ -728,7 +824,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             QCheckBox { spacing: 7px; }
             QCheckBox:focus { color: #1f665c; }
 
-            QLabel#timestampValue, QLabel#cursorValue, QLabel#intervalValue, QDoubleSpinBox#timeSpin {
+            QLabel#timestampValue, QLabel#cursorValue, QDoubleSpinBox#timeSpin {
                 font-family: "Noto Sans Mono CJK SC", monospace;
                 font-size: 11px;
             }
@@ -819,22 +915,30 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.add_activity_button.clicked.connect(lambda: self._add_boundary(Track.ACTIVITY))
         self.add_terrain_button.clicked.connect(lambda: self._add_boundary(Track.TERRAIN))
         self.add_confirmation_button.clicked.connect(self._add_confirmation)
-        self.interval_track_combo.currentIndexChanged.connect(self._update_interval_values)
-        self.interval_start_button.clicked.connect(lambda: self._set_interval_edge(True))
-        self.interval_end_button.clicked.connect(lambda: self._set_interval_edge(False))
-        self.interval_add_button.clicked.connect(self._add_interval)
         self.qa_fixed_button.clicked.connect(lambda: self._resolve_qa("fixed"))
         self.qa_accept_button.clicked.connect(lambda: self._resolve_qa("accepted"))
         self.qa_list.currentItemChanged.connect(self._qa_selection_changed)
         self.review_checkbox.toggled.connect(self._review_toggled)
-        self._update_interval_values()
+        self.video_edit_1.editingFinished.connect(self._video_edited)
+        self.video_edit_2.editingFinished.connect(self._video_edited)
 
     def _set_session_enabled(self, enabled: bool) -> None:
         for action in self.session_actions:
             action.setEnabled(enabled)
+        read_only = bool(self.trial and self.trial.is_read_only)
+        for action in self.editable_actions:
+            action.setEnabled(enabled and not read_only)
+        if self.trial is not None and self.trial.is_v3:
+            self.labels_action.setEnabled(False)
         self.raw_checkbox.setEnabled(enabled)
         self.auxiliary_button.setEnabled(self.trial is not None and not self._busy)
         self.event_table.setEnabled(enabled)
+        for widget in (
+            self.add_activity_button,
+            self.add_terrain_button,
+            self.add_confirmation_button,
+        ):
+            widget.setEnabled(enabled and not read_only)
         self.workspace_stack.setCurrentWidget(self.main_splitter if self.trial is not None else self.empty_state)
 
     def _set_busy(self, busy: bool, message: str = "") -> None:
@@ -894,6 +998,26 @@ class AnnotationEditor(QtWidgets.QMainWindow):
     def _trial_loaded(self, result: object, *, target: Path | None) -> None:
         trial = result
         assert isinstance(trial, TrialData)
+        self.trial = trial
+        self._set_mode_badge(trial)
+        self.source_label.setText(f"{trial.session_id} / {trial.trial_id}    {trial.path.name}")
+        self.source_label.setToolTip(str(trial.path))
+        if not trial.file_info.supported:
+            QtWidgets.QMessageBox.warning(self, "无法判断协议版本", trial.file_info.reason)
+            self._dispose_session()
+            return
+        if trial.is_read_only:
+            self.catalog = LabelCatalog.default()
+            self.document = None
+            self.repository = None
+            self.recovery = None
+            self.target_label.setText("源记录只读：不生成正式标注文件")
+            self.target_label.setToolTip("V3 T04 的 _1/_2 源记录仅用于查看和对照")
+            self._refresh_label_combos()
+            self._plot_trial()
+            self._refresh()
+            self._run_task("正在生成 V2 建议（只读）...", lambda: recognize(trial), self._initial_recognition_finished)
+            return
         target = (target or trial.path.parent / "state_changes.csv").expanduser().resolve()
         try:
             repository = AnnotationRepository(target, trial)
@@ -913,21 +1037,18 @@ class AnnotationEditor(QtWidgets.QMainWindow):
                 repository.close()
                 QtWidgets.QMessageBox.critical(self, "无法读取标注", str(exc))
                 return
-        self.trial = trial
         self.repository = repository
         self.recovery = recovery
-        self.source_label.setText(f"{trial.session_id} / {trial.trial_id}    {trial.path.name}")
-        self.source_label.setToolTip(str(trial.path))
+        self.document = document
+        self._set_mode_badge(trial)
         self.target_label.setText(f"标注文件：{target}")
         self.target_label.setToolTip(str(target))
         self._refresh_label_combos()
         self._plot_trial()
         if document is None:
-            self.document = None
             self._refresh()
             self._run_task("正在自动识别状态边界...", lambda: recognize(trial), self._initial_recognition_finished)
         else:
-            self.document = document
             self._refresh()
             self.statusBar().showMessage("已优先载入现有标注", 5000)
 
@@ -959,6 +1080,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             return
         result.catalog = self.catalog
         self.document = result
+        self._refresh_label_combos()
         self._refresh()
         self.statusBar().showMessage("自动识别完成，结果为待复核草稿", 5000)
 
@@ -974,16 +1096,27 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.document = document
         self.catalog = repository.catalog if repository else document.catalog
         self.document.catalog = self.catalog
-        self.repository = repository
-        self.recovery = RecoveryStore(trial, repository.target, catalog=self.catalog) if repository else None
+        if trial.is_read_only:
+            if repository:
+                repository.close()
+            self.repository = None
+            self.recovery = None
+        else:
+            self.repository = repository
+            self.recovery = RecoveryStore(trial, repository.target, catalog=self.catalog) if repository else None
+        self._set_mode_badge(trial)
         self.source_label.setText(f"{trial.session_id} / {trial.trial_id}    {trial.path.name}")
-        self.target_label.setText(f"标注文件：{repository.target}" if repository else "标注文件：未连接")
+        self.target_label.setText(
+            "源记录只读：不生成正式标注文件"
+            if trial.is_read_only
+            else f"标注文件：{repository.target}" if repository else "标注文件：未连接"
+        )
         self._refresh_label_combos()
         self._plot_trial()
         self._refresh()
 
     def choose_target(self) -> None:
-        if self.trial is None or self.document is None:
+        if self.trial is None or self.document is None or self.trial.is_read_only:
             return
         initial = str(self.repository.target if self.repository else self.trial.path.parent / "state_changes.csv")
         name, _ = QtWidgets.QFileDialog.getSaveFileName(self, "选择聚合标注文件", initial, "CSV 文件 (*.csv)")
@@ -1096,15 +1229,61 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         kind = KIND_NAMES[event.kind]
         if event.kind in {ConfirmationKind.STAIR_SECOND_STEP.value, ConfirmationKind.TRIAL_END.value}:
             return kind
-        return f"{kind}  {state_name(event.activity, event.terrain, self.catalog)}"
+        return f"{kind}  {self._state_name(event.activity, event.terrain)}"
+
+    def _default_component_id(self, event: ComposedEvent) -> str:
+        assert self.document is not None
+        components = [
+            item
+            for item in [*self.document.boundaries, *self.document.confirmations]
+            if item.id in event.component_ids
+        ]
+        for track in (Track.TERRAIN, Track.ACTIVITY):
+            component = next(
+                (item for item in components if isinstance(item, Boundary) and item.track is track),
+                None,
+            )
+            if component is not None:
+                return component.id
+        return event.component_ids[0]
+
+    def _state_name(self, activity: str, terrain: str) -> str:
+        if self.document is not None and self.document.is_v3:
+            return self.document.label_schema.state_name(activity, terrain)
+        return state_name(activity, terrain, self.catalog)
+
+    def _label_display(self, track: Track, value: str) -> str:
+        if self.document is not None and self.document.is_v3:
+            return next(
+                (
+                    label.display_name
+                    for label in self.document.label_schema.labels(track, include_inactive=True)
+                    if label.code == value
+                ),
+                value,
+            )
+        return self.catalog.display(track, value)
+
+    def _dual_time_text(self, index: int) -> str:
+        assert self.trial is not None
+        display = self.trial.time_display(index)
+        merged = f"合并 {display['merged_seconds']:.3f}s"
+        if display.get("source_video") == "1":
+            return f"{merged} · 源视频1 {display['source1_seconds']:.3f}s"
+        if display.get("source_video") == "2":
+            return f"{merged} · 源视频2 {display['source2_seconds']:.3f}s"
+        return merged
 
     def _event_tooltip(self, event) -> str:
         assert self.trial is not None
         lines = [
+            self._dual_time_text(event.sample_index),
             self.trial.timestamp(event.sample_index),
-            f"{KIND_NAMES[event.kind]}：{state_name(event.activity, event.terrain, self.catalog)}",
+            f"{KIND_NAMES[event.kind]}：{self._state_name(event.activity, event.terrain)}",
             f"来源：{SOURCE_NAMES[event.provenance]}",
         ]
+        if self.document is not None and self.document.is_v2_suggestion and event.provenance is Provenance.AUTO:
+            lines.append("V2 建议 / V3 待复核")
         if event.user_note:
             lines.append(f"备注：{event.user_note}")
         return "\n".join(lines)
@@ -1113,13 +1292,18 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         for item in self._main_annotation_items:
             self.leg_plot.removeItem(item)
         self._main_annotation_items.clear()
+        self._event_callouts.clear()
         self.annotation_plot.clear()
         if self.trial is None or self.document is None:
             return
 
         trial, document = self.trial, self.document
         for start_index, end_index, activity, terrain in document.intervals():
-            color = QtGui.QColor(state_color(activity, terrain))
+            color = QtGui.QColor(
+                document.label_schema.state_color(activity, terrain)
+                if document.is_v3
+                else state_color(activity, terrain)
+            )
             color.setAlpha(38)
             region = pg.LinearRegionItem(
                 values=(float(trial.seconds[start_index]), float(trial.seconds[end_index])),
@@ -1135,7 +1319,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
 
         for position, event in enumerate(document.composed_events()):
             seconds = float(trial.seconds[event.sample_index])
-            component_id = event.component_ids[0]
+            component_id = self._default_component_id(event)
             selected = event.id == self.selected_event_id
             confirmation = event.kind in {
                 ConfirmationKind.STAIR_SECOND_STEP.value,
@@ -1175,13 +1359,18 @@ class AnnotationEditor(QtWidgets.QMainWindow):
                 border=pg.mkPen(color, width=1 if selected else 0.7),
                 fill=pg.mkBrush("#edf7f3" if selected else "#ffffff"),
                 ensureInBounds=False,
+                draggable=not document.is_read_only and event.kind not in {"initial", "stitch_initial"},
             )
             label.setFont(QtGui.QFont("Noto Sans CJK SC", 8, QtGui.QFont.Weight.Medium))
             label.setToolTip(self._event_tooltip(event))
             label.setPos(seconds, lane_y)
             label.clicked.connect(self._annotation_clicked)
+            label.drag_started.connect(self._annotation_drag_started)
+            label.dragged.connect(self._annotation_dragged)
+            label.drag_finished.connect(self._annotation_drag_finished)
             self.annotation_plot.addItem(connector)
             self.annotation_plot.addItem(label)
+            self._event_callouts[component_id] = EventCallout(event, label, connector, line, lane_y)
         self.annotation_plot.setYRange(0, 3, padding=0)
 
     def _populate_state_plot(self) -> None:
@@ -1198,7 +1387,24 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         for start_index, end_index, activity, terrain in document.intervals():
             start, end = float(trial.seconds[start_index]), float(trial.seconds[end_index])
             width = max(end - start, duration / max(len(trial.seconds), 1))
-            for y, color in ((1.05, state_color(activity, terrain)), (0.05, label_color("terrain", terrain))):
+            state_fill = (
+                document.label_schema.state_color(activity, terrain)
+                if document.is_v3
+                else state_color(activity, terrain)
+            )
+            terrain_fill = (
+                next(
+                    (
+                        label.color
+                        for label in document.label_schema.labels(Track.TERRAIN, include_inactive=True)
+                        if label.code == terrain
+                    ),
+                    "#607D8B",
+                )
+                if document.is_v3
+                else label_color("terrain", terrain)
+            )
+            for y, color in ((1.05, state_fill), (0.05, terrain_fill)):
                 rectangle = QtWidgets.QGraphicsRectItem(start, y, width, 0.8)
                 brush = QtGui.QColor(color)
                 brush.setAlpha(105)
@@ -1208,7 +1414,13 @@ class AnnotationEditor(QtWidgets.QMainWindow):
                 self.state_plot.addItem(rectangle)
                 self._state_items.append(rectangle)
             if end - start > duration * 0.075:
-                activity_text = pg.TextItem(self.catalog.display("activity", activity), color="#34413b", anchor=(0, 0.5))
+                activity_text = pg.TextItem(
+                    self.document.label_schema.state_name(activity, "LEVEL").split("·", 1)[0]
+                    if document.is_v3
+                    else self.catalog.display("activity", activity),
+                    color="#34413b",
+                    anchor=(0, 0.5),
+                )
                 activity_text.setPos(start + min(0.25, (end - start) * 0.04), 1.45)
                 activity_text.setZValue(-2)
                 self.state_plot.addItem(activity_text)
@@ -1225,7 +1437,11 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             line = pg.InfiniteLine(
                 pos=float(trial.seconds[boundary.sample_index]),
                 angle=90,
-                movable=boundary.sample_index != 0,
+                movable=(
+                    not document.is_read_only
+                    and boundary.sample_index != 0
+                    and not boundary.is_stitch_initial
+                ),
                 pen=pg.mkPen(color, width=3 if selected else 2, style=provenance_style[boundary.provenance]),
                 hoverPen=pg.mkPen("#a84d45", width=4),
                 span=(0.35, 0.64) if boundary.track is Track.ACTIVITY else (0.02, 0.30),
@@ -1240,7 +1456,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             line = pg.InfiniteLine(
                 pos=float(trial.seconds[confirmation.sample_index]),
                 angle=90,
-                movable=True,
+                movable=not document.is_read_only,
                 pen=pg.mkPen("#4f7881", width=3 if selected else 2, style=QtCore.Qt.PenStyle.DashLine),
                 hoverPen=pg.mkPen("#a84d45", width=4),
                 span=(0.70, 0.98),
@@ -1301,7 +1517,9 @@ class AnnotationEditor(QtWidgets.QMainWindow):
                 cursor.setValue(seconds)
         finally:
             self._syncing_cursor = False
-        self.cursor_label.setText(f"{seconds:.3f} s  |  {self.trial.timestamp(self.cursor_index)}")
+        self.cursor_label.setText(
+            f"{self._dual_time_text(self.cursor_index)}  |  {self.trial.timestamp(self.cursor_index)}"
+        )
 
     def _cursor_dragged(self, cursor: pg.InfiniteLine, *_args) -> None:
         if self._syncing_cursor or self.trial is None:
@@ -1353,11 +1571,11 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         time_font.setPointSize(9)
         for row, event in enumerate(events):
             values = (
-                self.trial.timestamp(event.sample_index),
+                self._dual_time_text(event.sample_index),
                 KIND_NAMES[event.kind],
-                self.catalog.display("activity", event.activity),
-                self.catalog.display("terrain", event.terrain),
-                SOURCE_NAMES[event.provenance],
+                self._label_display(Track.ACTIVITY, event.activity),
+                self._label_display(Track.TERRAIN, event.terrain),
+                "V2 建议" if self.document and self.document.is_v2_suggestion and event.provenance is Provenance.AUTO else SOURCE_NAMES[event.provenance],
                 event.user_note,
             )
             for column, value in enumerate(values):
@@ -1379,7 +1597,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         event_id = item.data(QtCore.Qt.ItemDataRole.UserRole)
         event = next(value for value in self.document.composed_events() if value.id == event_id)
         self.selected_event_id = event.id
-        self.selected_component_id = event.component_ids[0]
+        self.selected_component_id = self._default_component_id(event)
         self._set_cursor(event.sample_index)
         self._refresh(select_component=self.selected_component_id)
 
@@ -1389,11 +1607,14 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.component_combo.clear()
         self.value_combo.clear()
         if event is None or self.trial is None or self.document is None:
+            self.value_label.setText("标签")
             self.timestamp_label.setText("-")
             self.component_combo.blockSignals(False)
             self.value_combo.blockSignals(False)
             return
-        self.timestamp_label.setText(self.trial.timestamp(event.sample_index))
+        self.timestamp_label.setText(
+            f"{self._dual_time_text(event.sample_index)}\n{self.trial.timestamp(event.sample_index)}"
+        )
         self.time_spin.setValue(float(self.trial.seconds[event.sample_index]))
         components = [item for item in [*self.document.boundaries, *self.document.confirmations] if item.id in event.component_ids]
         labels = {Track.ACTIVITY: "活动边界", Track.TERRAIN: "地形边界"}
@@ -1403,7 +1624,11 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             else:
                 label = "第二步确认" if component.kind is ConfirmationKind.STAIR_SECOND_STEP else "收尾确认"
             self.component_combo.addItem(label, component.id)
-        preferred = self.selected_component_id if self.selected_component_id in event.component_ids else event.component_ids[0]
+        preferred = (
+            self.selected_component_id
+            if self.selected_component_id in event.component_ids
+            else self._default_component_id(event)
+        )
         index = self.component_combo.findData(preferred)
         self.component_combo.setCurrentIndex(max(0, index))
         self.selected_component_id = preferred
@@ -1431,15 +1656,18 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.value_combo.blockSignals(True)
         self.value_combo.clear()
         if component is None:
+            self.value_label.setText("标签")
             self.value_combo.blockSignals(False)
             return
         if isinstance(component, Boundary):
-            for value, display, enabled in self.catalog.entries(component.track, include=(component.value,)):
+            self.value_label.setText("活动标签" if component.track is Track.ACTIVITY else "地形标签")
+            for value, display, enabled in self._label_entries(component.track, include=(component.value,)):
                 suffix = "（已停用）" if not enabled else ""
                 self.value_combo.addItem(f"{display}{suffix}", value)
             self.value_combo.setCurrentIndex(self.value_combo.findData(component.value))
-            self.value_combo.setEnabled(True)
+            self.value_combo.setEnabled(not self.document.is_read_only)
         else:
+            self.value_label.setText("确认类型")
             self.value_combo.addItem("确认标记")
             self.value_combo.setEnabled(False)
         self.note_edit.setText(component.user_note)
@@ -1447,11 +1675,72 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.evidence_label.setText(
             "  ".join(f"{name} {value:.3f}" for name, value in signals.items()) or "无自动证据记录"
         )
-        self.time_spin.setEnabled(component.sample_index != 0)
-        self.previous_sample_button.setEnabled(component.sample_index > 0)
-        self.next_sample_button.setEnabled(self.trial is not None and component.sample_index < len(self.trial.seconds) - 1)
-        self.delete_button.setEnabled(component.sample_index != 0)
+        editable = not self.document.is_read_only
+        fixed = isinstance(component, Boundary) and component.is_stitch_initial
+        self.note_edit.setEnabled(editable)
+        self.time_spin.setEnabled(editable and component.sample_index != 0 and not fixed)
+        self.previous_sample_button.setEnabled(editable and component.sample_index > 0 and not fixed)
+        self.next_sample_button.setEnabled(
+            editable and self.trial is not None and component.sample_index < len(self.trial.seconds) - 1 and not fixed
+        )
+        self.delete_button.setEnabled(editable and component.sample_index != 0 and not fixed)
         self.value_combo.blockSignals(False)
+
+    def _annotation_drag_started(self, component_id: str) -> None:
+        callout = self._event_callouts.get(component_id)
+        if callout is None:
+            return
+        self.selected_component_id = component_id
+        self.selected_event_id = callout.event.id
+        callout.label.border = pg.mkPen("#1f6f63", width=1)
+        callout.label.fill = pg.mkBrush("#edf7f3")
+        callout.label.update()
+        confirmation = callout.event.kind in {
+            ConfirmationKind.STAIR_SECOND_STEP.value,
+            ConfirmationKind.TRIAL_END.value,
+        }
+        style = (
+            QtCore.Qt.PenStyle.DashLine
+            if confirmation
+            else QtCore.Qt.PenStyle.SolidLine
+        )
+        callout.line.setPen(pg.mkPen("#1f6f63", width=1.6, style=style))
+        callout.connector.setPen(pg.mkPen("#1f6f63", width=1))
+
+    def _annotation_dragged(self, component_id: str, scene_position: QtCore.QPointF) -> None:
+        if self.trial is None or self.document is None or self.document.is_read_only:
+            return
+        callout = self._event_callouts.get(component_id)
+        if callout is None:
+            return
+        low, high = self.document.event_move_bounds(callout.event)
+        seconds = float(self.annotation_plot.vb.mapSceneToView(scene_position).x())
+        seconds = max(float(self.trial.seconds[low]), min(float(self.trial.seconds[high]), seconds))
+        callout.label.setPos(seconds, callout.lane_y)
+        callout.connector.setData([seconds, seconds], [0.02, callout.lane_y - 0.18])
+        callout.line.setValue(seconds)
+        for item_id in callout.event.component_ids:
+            marker = self._markers.get(item_id)
+            if marker is not None:
+                marker.setValue(seconds)
+
+    def _annotation_drag_finished(self, component_id: str, scene_position: QtCore.QPointF) -> None:
+        if self.trial is None or self.document is None or self.document.is_read_only:
+            return
+        callout = self._event_callouts.get(component_id)
+        if callout is None:
+            return
+        self._annotation_dragged(component_id, scene_position)
+        index = self.trial.nearest_index(float(callout.label.pos().x()))
+        try:
+            self.document.move_event(callout.event, index)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "无法移动", str(exc))
+        moved = next(
+            event for event in self.document.composed_events() if component_id in event.component_ids
+        )
+        self._set_cursor(moved.sample_index)
+        self._refresh(select_component=component_id)
 
     def _marker_clicked(self, component_id: str, *_args) -> None:
         self.selected_component_id = component_id
@@ -1467,7 +1756,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self._marker_clicked(component_id)
 
     def _marker_moved(self, component_id: str, line: pg.InfiniteLine, *_args) -> None:
-        if self.trial is None or self.document is None:
+        if self.trial is None or self.document is None or self.document.is_read_only:
             return
         component = next(item for item in [*self.document.boundaries, *self.document.confirmations] if item.id == component_id)
         index = self.trial.nearest_index(float(line.value()))
@@ -1487,7 +1776,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         return next((event for event in self.document.composed_events() if event.id == self.selected_event_id), None)
 
     def _time_edited(self) -> None:
-        if self._refreshing or self.trial is None or self.document is None:
+        if self._refreshing or self.trial is None or self.document is None or self.document.is_read_only:
             return
         event = self._selected_event()
         if event is None:
@@ -1500,7 +1789,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self._refresh(select_component=self.selected_component_id)
 
     def _step_selected(self, direction: int) -> None:
-        if self.document is None or self.trial is None:
+        if self.document is None or self.trial is None or self.document.is_read_only:
             return
         event = self._selected_event()
         if event is None:
@@ -1560,19 +1849,8 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             return
         self._refresh(select_component=item.id)
 
-    def _update_interval_values(self) -> None:
-        combo = self.interval_value_combo
-        current = combo.currentData()
-        combo.clear()
-        track = self.interval_track_combo.currentData()
-        for value, display, _enabled in self.catalog.entries(track):
-            combo.addItem(display, value)
-        index = combo.findData(current)
-        if index >= 0:
-            combo.setCurrentIndex(index)
-
     def manage_labels(self) -> None:
-        if self.repository is None:
+        if self.repository is None or (self.document is not None and self.document.is_v3):
             return
         catalog = LabelCatalog(dict(self.catalog.activities), dict(self.catalog.terrains))
         track_name, accepted = QtWidgets.QInputDialog.getItem(
@@ -1601,7 +1879,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
                 (value, display)
                 for value, display, state in catalog.entries(track, include_disabled=True)
                 if state is not enabled
-                and value not in (ACTIVITY_NAMES if track is Track.ACTIVITY else TERRAIN_NAMES)
+                and value not in (ACTIVITY_NAMES if track is Track.ACTIVITY else V2_TERRAIN_NAMES)
             ]
             if not candidates:
                 QtWidgets.QMessageBox.information(self, "管理标注类别", "没有可操作的自定义类别")
@@ -1628,39 +1906,6 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self._refresh_label_combos()
         self._refresh(select_component=self.selected_component_id)
 
-    def _set_interval_edge(self, start: bool) -> None:
-        if start:
-            self.interval_start = self.cursor_index
-        else:
-            self.interval_end = self.cursor_index
-        self._update_interval_label()
-
-    def _update_interval_label(self) -> None:
-        if self.trial is None or self.interval_start is None or self.interval_end is None:
-            self.interval_range_label.setText("未设置")
-            return
-        a, b = sorted((self.interval_start, self.interval_end))
-        self.interval_range_label.setText(f"{self.trial.seconds[a]:.3f} s -> {self.trial.seconds[b]:.3f} s")
-
-    def _add_interval(self) -> None:
-        if self.document is None or self.interval_start is None or self.interval_end is None:
-            QtWidgets.QMessageBox.warning(self, "无法添加", "必须先设置区间开始与结束")
-            return
-        start, end = sorted((self.interval_start, self.interval_end))
-        try:
-            self.document.add_interval(
-                self.interval_track_combo.currentData(),
-                start,
-                end,
-                self.interval_value_combo.currentData(),
-            )
-        except ValueError as exc:
-            QtWidgets.QMessageBox.warning(self, "无法添加", str(exc))
-            return
-        self.interval_start = self.interval_end = None
-        self._update_interval_label()
-        self._refresh()
-
     def delete_selected(self) -> None:
         component = self._component()
         if component is None or self.document is None:
@@ -1686,8 +1931,10 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.qa_list.clear()
         for issue in self.document.issues:
             prefix = "[已闭环]" if issue.resolved else "[阻断]" if issue.severity is Severity.BLOCKING else "[提示]"
-            item = QtWidgets.QListWidgetItem(f"{prefix} {issue.message}")
+            interval = f" [{issue.start:.3f}–{issue.end:.3f}s]" if issue.start is not None and issue.end is not None else ""
+            item = QtWidgets.QListWidgetItem(f"{prefix}{interval} {issue.message}")
             item.setData(QtCore.Qt.ItemDataRole.UserRole, issue.id)
+            item.setToolTip(issue.message)
             if issue.resolved:
                 item.setForeground(QtGui.QColor("#28695f"))
             elif issue.severity is Severity.BLOCKING:
@@ -1696,13 +1943,19 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             if issue.id == current:
                 self.qa_list.setCurrentItem(item)
         has_selection = self.qa_list.currentItem() is not None
-        self.qa_fixed_button.setEnabled(has_selection)
-        self.qa_accept_button.setEnabled(has_selection)
+        editable = not self.document.is_read_only
+        self.qa_fixed_button.setEnabled(has_selection and editable)
+        self.qa_accept_button.setEnabled(has_selection and editable)
 
     def _qa_selection_changed(self, current, _previous) -> None:
-        enabled = current is not None
+        enabled = current is not None and self.document is not None and not self.document.is_read_only
         self.qa_fixed_button.setEnabled(enabled)
         self.qa_accept_button.setEnabled(enabled)
+        if current is not None and self.document is not None and self.trial is not None:
+            issue_id = current.data(QtCore.Qt.ItemDataRole.UserRole)
+            issue = next((item for item in self.document.issues if item.id == issue_id), None)
+            if issue is not None and issue.start is not None:
+                self._set_cursor(self.trial.nearest_index(issue.start))
 
     def _resolve_qa(self, resolution: str) -> None:
         if self.document is None or self.qa_list.currentItem() is None:
@@ -1722,15 +1975,26 @@ class AnnotationEditor(QtWidgets.QMainWindow):
     def _update_review(self) -> None:
         assert self.document is not None
         errors = self.document.structural_errors()
+        audit_errors = self.document.audit_errors()
         unresolved = [issue for issue in self.document.issues if not issue.resolved]
+        self._update_video_fields()
         self.review_checkbox.blockSignals(True)
         self.review_checkbox.setChecked(self.document.reviewed is not None)
-        self.review_checkbox.setEnabled(not errors and not unresolved)
+        self.review_checkbox.setEnabled(
+            not self.document.is_read_only and not errors and not audit_errors and not unresolved
+        )
+        self.annotator_edit.setEnabled(not self.document.is_read_only)
         if self.document.reviewed:
             self.annotator_edit.setText(self.document.reviewed["annotator_id"])
         self.review_checkbox.blockSignals(False)
-        if errors:
+        if self.document.is_read_only:
+            self.validation_label.setText("源记录只读，仅用于查看和对照")
+            status = "neutral"
+        elif errors:
             self.validation_label.setText("；".join(errors))
+            status = "error"
+        elif audit_errors:
+            self.validation_label.setText("；".join(audit_errors))
             status = "error"
         elif unresolved:
             self.validation_label.setText(f"尚有 {len(unresolved)} 个 QA 复核项未闭环")
@@ -1742,6 +2006,37 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             self.validation_label.setText("结构与复核条件已满足")
             status = "success"
         self._set_dynamic_property(self.validation_label, "status", status)
+
+    def _update_video_fields(self) -> None:
+        if self.document is None:
+            return
+        visible = self.document.is_formal_v3
+        for label, edit in (
+            (self.video_label_1, self.video_edit_1),
+            (self.video_label_2, self.video_edit_2),
+        ):
+            label.setVisible(visible)
+            edit.setVisible(visible)
+            edit.setEnabled(visible and not self.document.is_read_only)
+        if not visible:
+            return
+        files = self.document.video_files
+        self.video_edit_1.blockSignals(True)
+        self.video_edit_2.blockSignals(True)
+        self.video_edit_1.setText(files[0] if len(files) > 0 else "")
+        self.video_edit_2.setText(files[1] if len(files) > 1 else "")
+        self.video_edit_1.blockSignals(False)
+        self.video_edit_2.blockSignals(False)
+
+    def _video_edited(self) -> None:
+        if self._refreshing or self.document is None or not self.document.is_formal_v3:
+            return
+        files = [edit.text() for edit in (self.video_edit_1, self.video_edit_2) if edit.text().strip()]
+        try:
+            self.document.set_video_files(files)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "审核视频信息无效", str(exc))
+        self._refresh()
 
     def _review_toggled(self, checked: bool) -> None:
         if self._refreshing or self.document is None:
@@ -1767,7 +2062,16 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             self.save_action.setEnabled(False)
             return
         assert self.document is not None
+        if self.document.is_read_only:
+            self.review_badge.setText("只读查看")
+            self._set_dynamic_property(self.review_badge, "status", "neutral")
+            self.save_action.setEnabled(False)
+            self.undo_action.setEnabled(False)
+            self.redo_action.setEnabled(False)
+            self.delete_action.setEnabled(False)
+            return
         errors = self.document.structural_errors()
+        errors.extend(self.document.audit_errors())
         unresolved = sum(not issue.resolved for issue in self.document.issues)
         if errors:
             text, status = f"结构错误 {len(errors)}", "error"
@@ -1784,7 +2088,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.save_action.setEnabled(self.repository is not None and self.document.ready_to_save)
         self.undo_action.setEnabled(bool(self.document._undo))
         self.redo_action.setEnabled(bool(self.document._redo))
-        self.delete_action.setEnabled(self._component() is not None)
+        self.delete_action.setEnabled(self._component() is not None and not self.document.is_read_only)
 
     def undo(self) -> None:
         if self.document and self.document.undo():
@@ -1795,7 +2099,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             self._refresh(select_component=self.selected_component_id)
 
     def rerun_recognition(self) -> None:
-        if self.trial is None or self.document is None:
+        if self.trial is None or self.document is None or self.trial.is_read_only:
             return
         answer = QtWidgets.QMessageBox.question(
             self,
@@ -1814,7 +2118,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self._run_task("正在重新自动识别...", lambda: recognize(trial), finished)
 
     def save_formal(self) -> bool:
-        if self.document is None or self.repository is None:
+        if self.document is None or self.repository is None or self.document.is_read_only:
             return False
         try:
             self.repository.save(self.document)
@@ -1887,6 +2191,14 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.cursor_index = 0
         self.source_label.setText("未打开试次")
         self.target_label.setText("标注文件：未选择")
+        self._set_mode_badge(None)
+        for label, edit in (
+            (self.video_label_1, self.video_edit_1),
+            (self.video_label_2, self.video_edit_2),
+        ):
+            label.setVisible(False)
+            edit.setVisible(False)
+            edit.clear()
         self.review_badge.setText("未载入")
         self._set_dynamic_property(self.review_badge, "status", "empty")
         self.event_table.setRowCount(0)

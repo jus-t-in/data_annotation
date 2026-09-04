@@ -21,6 +21,13 @@ class _Trial:
         return "0.0"
 
 
+def test_default_catalog_uses_v2_terrain_display_aliases() -> None:
+    catalog = LabelCatalog.default()
+
+    assert catalog.display(Track.TERRAIN, "ASCENT") == "上楼/上坡"
+    assert catalog.display(Track.TERRAIN, "DESCENT") == "下楼/下坡"
+
+
 def test_custom_labels_round_trip_and_soft_disable(tmp_path: Path) -> None:
     path = tmp_path / "label_catalog.json"
     catalog = LabelCatalog.default()
