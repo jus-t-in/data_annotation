@@ -49,6 +49,7 @@ def _event_text(document: AnnotationDocument, event: ComposedEvent) -> str:
         "stitch_initial": "接缝初始化",
         ConfirmationKind.STAIR_SECOND_STEP.value: "第二步确认",
         ConfirmationKind.TRIAL_END.value: "收尾确认",
+        ConfirmationKind.GAP_RECONFIRMATION.value: "断档后重新确认",
     }[event.kind]
     heading = f"{kind}：{document.label_schema.state_name(event.activity, event.terrain)}"
     lines = NOTE_WRAPPER.wrap(heading)
@@ -148,6 +149,7 @@ def _build_annotation_figure(
         is_confirmation = event.kind in {
             ConfirmationKind.STAIR_SECOND_STEP.value,
             ConfirmationKind.TRIAL_END.value,
+            ConfirmationKind.GAP_RECONFIRMATION.value,
         }
         leg_axis.axvline(
             x_at(float(trial.seconds[event.sample_index])),

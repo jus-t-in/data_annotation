@@ -244,6 +244,7 @@ class AnnotationRepository:
             "stitch_initial": "接缝初始化事件",
             ConfirmationKind.STAIR_SECOND_STEP.value: "楼梯第二步确认",
             ConfirmationKind.TRIAL_END.value: "试次收尾确认",
+            ConfirmationKind.GAP_RECONFIRMATION.value: "断档后重新确认",
         }[event.kind]
         note = f"近似：{source}的{kind}"
         return f"{note}；{event.user_note}" if event.user_note else note
@@ -305,6 +306,7 @@ class AnnotationRepository:
             "suggestion": copy.deepcopy(document.detail.get("suggestion")),
             "legacy_qa": copy.deepcopy(document.detail.get("legacy_qa", [])),
             "gap_contract": copy.deepcopy(document.detail.get("gap_contract", {})),
+            "gap_declarations": document.gap_declarations(),
             "batch_note": document.detail.get("batch_note", ""),
             "document": document_data,
             "events": [

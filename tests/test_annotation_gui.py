@@ -15,7 +15,7 @@ from youbu_annotation.constants import label_color, state_color
 from youbu_annotation.gui import AnnotationEditor, EventLabel
 from youbu_annotation.label_schema import DEFAULT_V3_SCHEMA
 from youbu_annotation.model import AnnotationDocument, Boundary, Confirmation, ConfirmationKind, Provenance, Track
-from youbu_annotation.trial import TrialData
+from youbu_annotation.trial import DataGap, TrialData
 
 
 @pytest.fixture(scope="session")
@@ -86,6 +86,32 @@ def v3_document(v3_trial: TrialData) -> AnnotationDocument:
         ],
         label_schema=DEFAULT_V3_SCHEMA,
     )
+
+
+def test_gui_displays_gap_reconfirmation_as_fixed_event(application, v3_trial: TrialData):
+    v3_trial.gaps = [DataGap(2, 3, 1.2, 2.0)]
+    document = AnnotationDocument.from_rows(v3_trial, [])
+    window = AnnotationEditor()
+    window.load_session(v3_trial, document)
+    window.show()
+    application.processEvents()
+    try:
+        marker = next(
+            item for item in document.confirmations
+            if item.kind is ConfirmationKind.GAP_RECONFIRMATION
+        )
+        assert any(
+            window.event_table.item(row, 1).text() == "断档后重新确认"
+            for row in range(window.event_table.rowCount())
+        )
+        assert "1.200000–2.000000 s" in window.qa_list.item(0).text()
+        window.selected_component_id = marker.id
+        window._show_component()
+        assert not window.time_spin.isEnabled()
+        assert not window.delete_button.isEnabled()
+    finally:
+        window.close()
+        application.processEvents()
 
 
 @pytest.fixture

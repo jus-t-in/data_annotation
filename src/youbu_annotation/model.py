@@ -29,6 +29,7 @@ class Provenance(str, Enum):
 class ConfirmationKind(str, Enum):
     STAIR_SECOND_STEP = "stair_second_step"
     TRIAL_END = "trial_end"
+    GAP_RECONFIRMATION = "gap_reconfirmation"
 
 
 class Severity(str, Enum):
@@ -48,10 +49,15 @@ class Boundary:
     evidence: dict = field(default_factory=dict)
     parent_ids: list[str] = field(default_factory=list)
     event_kind: str = "boundary"
+    gap_key: str = ""
 
     @property
     def is_stitch_initial(self) -> bool:
         return self.event_kind == "stitch_initial"
+
+    @property
+    def is_gap_reconfirmation(self) -> bool:
+        return bool(self.gap_key)
 
     def to_dict(self) -> dict:
         result = copy.deepcopy(vars(self))
@@ -77,6 +83,7 @@ class Confirmation:
     original: dict | None = None
     evidence: dict = field(default_factory=dict)
     parent_ids: list[str] = field(default_factory=list)
+    gap_key: str = ""
 
     def to_dict(self) -> dict:
         result = copy.deepcopy(vars(self))
@@ -90,6 +97,10 @@ class Confirmation:
         data["kind"] = ConfirmationKind(data["kind"])
         data["provenance"] = Provenance(data["provenance"])
         return cls(**data)
+
+    @property
+    def is_gap_reconfirmation(self) -> bool:
+        return self.kind is ConfirmationKind.GAP_RECONFIRMATION
 
 
 @dataclass
@@ -147,6 +158,24 @@ def stable_component_id(trial: TrialData, sample_index: int, role: str, occurren
     return str(uuid.uuid5(EVENT_NAMESPACE, key))
 
 
+GAP_ISSUE_CODE = "input_gap_contract"
+
+
+def gap_key(gap) -> str:
+    return f"{gap.before_index}:{gap.after_index}:{gap.start:.9f}:{gap.end:.9f}"
+
+
+def gap_note_template(gap) -> str:
+    return f"采集异常：待填写；断档 {gap.start:.6f}–{gap.end:.6f} s；断档内无传感器证据。"
+
+
+def gap_issue_message(gap) -> str:
+    return (
+        f"采集异常断档待声明：{gap.start:.6f}–{gap.end:.6f} s；"
+        "请确认无需修改并填写判断依据"
+    )
+
+
 def provenance_from_note(note: str) -> Provenance:
     if "人工调整" in note or "人工修订" in note:
         return Provenance.ADJUSTED
@@ -166,6 +195,8 @@ def user_note_from_note(note: str) -> str:
 
 
 def confirmation_kind(note: str, activity: str, terrain: str) -> ConfirmationKind | None:
+    if "断档后重新确认" in note:
+        return ConfirmationKind.GAP_RECONFIRMATION
     if "第二步" in note:
         return ConfirmationKind.STAIR_SECOND_STEP
     if "收尾确认" in note or "结束静止确认" in note:
@@ -209,6 +240,9 @@ class AnnotationDocument:
         self.dirty = False
         self._undo: list[dict] = []
         self._redo: list[dict] = []
+        self._normalize()
+        self.ensure_stitch_initial_event(checkpoint=False)
+        self.ensure_gap_declarations(checkpoint=False)
         self._normalize()
         self.baseline = self._state_dict()
 
@@ -477,12 +511,205 @@ class AnnotationDocument:
                     and kept[-1].value == item.value
                     and not kept[-1].is_stitch_initial
                     and not item.is_stitch_initial
+                    and not kept[-1].is_gap_reconfirmation
+                    and not item.is_gap_reconfirmation
                 ):
                     continue
                 kept.append(item)
             self.boundaries = [item for item in self.boundaries if item.track != track] + kept
         self.boundaries.sort(key=lambda item: (item.sample_index, item.track.value))
         self.confirmations.sort(key=lambda item: item.sample_index)
+
+    def ensure_gap_declarations(self, *, checkpoint: bool = True) -> bool:
+        """Materialize one auditable QA and post-gap confirmation per data gap."""
+        if not self.is_v3:
+            return False
+        if checkpoint:
+            self._assert_editable()
+            self._checkpoint()
+        contract = self.trial.gap_contract()
+        self.detail["gap_contract"] = contract.to_dict()
+        changed = False
+        issues_by_key = {
+            (issue.start, issue.end): issue
+            for issue in self.issues
+            if issue.code == GAP_ISSUE_CODE
+        }
+        for gap in contract.data_gaps:
+            key = gap_key(gap)
+            if (gap.start, gap.end) not in issues_by_key:
+                issue = ReviewIssue(
+                    GAP_ISSUE_CODE,
+                    gap_issue_message(gap),
+                    Severity.BLOCKING,
+                    start=gap.start,
+                    end=gap.end,
+                )
+                self.issues.append(issue)
+                issues_by_key[(gap.start, gap.end)] = issue
+                changed = True
+
+            components = [
+                item
+                for item in self.boundaries
+                if item.sample_index == gap.after_index and not item.is_stitch_initial
+            ]
+            if components:
+                for item in components:
+                    changed = self._bind_gap_to_boundary(item, gap) or changed
+                continue
+
+            marker = next(
+                (
+                    item
+                    for item in self.confirmations
+                    if item.kind is ConfirmationKind.GAP_RECONFIRMATION
+                    and (item.gap_key == key or item.sample_index == gap.after_index)
+                ),
+                None,
+            )
+            if marker is None:
+                note = gap_note_template(gap)
+                marker = Confirmation(
+                    ConfirmationKind.GAP_RECONFIRMATION,
+                    gap.after_index,
+                    Provenance.AUTO,
+                    note,
+                    id=stable_component_id(self.trial, gap.after_index, ConfirmationKind.GAP_RECONFIRMATION.value),
+                    original={"gap": vars(gap), "notes": note},
+                    gap_key=key,
+                )
+                self.confirmations.append(marker)
+                changed = True
+            else:
+                if marker.gap_key != key:
+                    marker.gap_key = key
+                    changed = True
+                changed = self._ensure_gap_note(marker, gap) or changed
+            self._record_gap_evidence(marker, gap)
+        changed = self._migrate_legacy_gap_review(contract) or changed
+        self._normalize()
+        if hasattr(self, "baseline"):
+            self.dirty = self._state_dict() != self.baseline
+        return changed
+
+    def _migrate_legacy_gap_review(self, contract) -> bool:
+        if self.is_read_only or contract.errors or len(contract.data_gaps) != 1:
+            return False
+        legacy = [
+            issue for issue in self.issues
+            if issue.code == GAP_ISSUE_CODE
+            and issue.message == "V3 正式/源文件存在未声明数据断档"
+            and issue.start is None and issue.end is None
+        ]
+        if len(legacy) != 1 or legacy[0].resolution != "accepted" or not legacy[0].resolved:
+            return False
+        gap = contract.data_gaps[0]
+        target = next(
+            issue for issue in self.issues
+            if issue.code == GAP_ISSUE_CODE and (issue.start, issue.end) == (gap.start, gap.end)
+        )
+        if target.resolution is not None or target.reason.strip():
+            return False
+        components = [
+            item for item in [*self.boundaries, *self.confirmations]
+            if item.gap_key == gap_key(gap)
+        ]
+        basis = f"判断依据：{legacy[0].reason.strip()}"
+        notes = [
+            item.user_note if basis in item.user_note else f"{item.user_note}；{basis}"
+            for item in components
+        ]
+        if not components or any(len(note) > 500 or "\n" in note or "\r" in note for note in notes):
+            return False
+        self.detail.setdefault("gap_review_migrations", []).append({
+            "source_issue": legacy[0].to_dict(),
+            "target_issue_id": target.id,
+            "gap": vars(gap).copy(),
+        })
+        target.resolution = "accepted"
+        target.reason = legacy[0].reason.strip()
+        for item, note in zip(components, notes):
+            item.user_note = note
+        self.issues.remove(legacy[0])
+        self.reviewed = None
+        return True
+
+    def _bind_gap_to_boundary(self, item: Boundary, gap) -> bool:
+        changed = item.gap_key != gap_key(gap)
+        item.gap_key = gap_key(gap)
+        changed = self._ensure_gap_note(item, gap) or changed
+        self._record_gap_evidence(item, gap)
+        return changed
+
+    @staticmethod
+    def _ensure_gap_note(item, gap) -> bool:
+        template = gap_note_template(gap)
+        note = item.user_note.strip()
+        token = f"断档 {gap.start:.6f}–{gap.end:.6f} s"
+        if token in note and note.startswith("采集异常："):
+            return False
+        item.user_note = template if not note else f"{template}；{note}"
+        return True
+
+    @staticmethod
+    def _gap_note_is_complete(note: str, gap) -> bool:
+        return note.startswith("采集异常：") and f"断档 {gap.start:.6f}–{gap.end:.6f} s" in note
+
+    def _record_gap_evidence(self, item, gap) -> None:
+        item.evidence.setdefault("sample_index", item.sample_index)
+        item.evidence["gap"] = vars(gap).copy()
+        try:
+            item.evidence.setdefault("signals", self.trial.values_at(item.sample_index))
+        except (KeyError, IndexError):
+            pass
+
+    def _gap_for_component(self, item):
+        key = getattr(item, "gap_key", "")
+        for gap in self.trial.gap_contract().data_gaps:
+            if key == gap_key(gap) or item.sample_index == gap.after_index:
+                return gap
+        return None
+
+    def _gap_for_issue(self, issue: ReviewIssue):
+        if issue.code != GAP_ISSUE_CODE:
+            return None
+        return next(
+            (
+                gap
+                for gap in self.trial.gap_contract().data_gaps
+                if gap.start == issue.start and gap.end == issue.end
+            ),
+            None,
+        )
+
+    def gap_declarations(self) -> list[dict]:
+        declarations = []
+        for gap in self.trial.gap_contract().data_gaps:
+            issue = next(
+                (
+                    item
+                    for item in self.issues
+                    if item.code == GAP_ISSUE_CODE
+                    and item.start == gap.start
+                    and item.end == gap.end
+                ),
+                None,
+            )
+            components = [
+                item
+                for item in [*self.boundaries, *self.confirmations]
+                if getattr(item, "gap_key", "") == gap_key(gap)
+            ]
+            declarations.append(
+                {
+                    "gap": vars(gap).copy(),
+                    "issue": issue.to_dict() if issue else None,
+                    "components": [item.to_dict() for item in components],
+                    "resolved": bool(issue and issue.resolved),
+                }
+            )
+        return declarations
 
     @property
     def is_v3(self) -> bool:
@@ -588,7 +815,8 @@ class AnnotationDocument:
         else:
             terrain.event_kind = "stitch_initial"
         self._normalize()
-        self.dirty = self._state_dict() != self.baseline
+        if hasattr(self, "baseline"):
+            self.dirty = self._state_dict() != self.baseline
         return True
 
     def track_boundaries(self, track: Track) -> list[Boundary]:
@@ -732,6 +960,17 @@ class AnnotationDocument:
         terrain = sorted(self.track_boundaries(Track.TERRAIN), key=lambda item: item.sample_index)
         for confirmation in self.confirmations:
             activity, terrain_value = self.state_at(confirmation.sample_index)
+            if confirmation.kind is ConfirmationKind.GAP_RECONFIRMATION:
+                gap = self._gap_for_component(confirmation)
+                if (
+                    gap is None
+                    or confirmation.sample_index != gap.after_index
+                    or gap_key(gap) != confirmation.gap_key
+                ):
+                    errors.append("断档后重新确认标记必须固定在对应断档后的首个采样点")
+                elif not self._gap_note_is_complete(confirmation.user_note, gap):
+                    errors.append("断档后重新确认备注缺少固定前缀或断档区间")
+                continue
             if confirmation.kind is ConfirmationKind.STAIR_SECOND_STEP:
                 host = None
                 for index, boundary in enumerate(terrain):
@@ -756,6 +995,20 @@ class AnnotationDocument:
                 errors.append(f"未知标签：{item.value}")
             if len(item.user_note) > 500 or any(ord(char) < 32 for char in item.user_note):
                 errors.append("边界备注含控制字符或超过 500 字")
+            if item.is_gap_reconfirmation:
+                gap = self._gap_for_component(item)
+                if gap is None or item.sample_index != gap.after_index:
+                    errors.append("断档后复用的状态边界必须固定在对应断档后的首个采样点")
+                elif not self._gap_note_is_complete(item.user_note, gap):
+                    errors.append("断档后复用的状态边界备注缺少固定前缀或断档区间")
+        if self.is_v3:
+            for gap in self.trial.gap_contract().data_gaps:
+                key = gap_key(gap)
+                if not any(
+                    getattr(item, "gap_key", "") == key
+                    for item in [*self.boundaries, *self.confirmations]
+                ):
+                    errors.append("数据断档缺少断档后重新确认标记")
         if self.is_v3 and not (self.is_formal_v3 and getattr(self.trial, "is_t04_merged", False)):
             errors.extend(self.trial.gap_contract().errors)
         return list(dict.fromkeys(errors))
@@ -770,6 +1023,8 @@ class AnnotationDocument:
         item = self.find_boundary(boundary_id)
         if item.is_stitch_initial:
             raise ValueError("接缝初始化事件时刻固定不可移动")
+        if item.is_gap_reconfirmation:
+            raise ValueError("断档后重新确认标记时刻固定不可移动")
         if item.sample_index == 0:
             raise ValueError("起始状态时刻不可移动")
         peers = sorted(self.track_boundaries(item.track), key=lambda value: value.sample_index)
@@ -783,14 +1038,15 @@ class AnnotationDocument:
         self._changed()
 
     def event_move_bounds(self, event: ComposedEvent) -> tuple[int, int]:
-        if event.kind == "stitch_initial" or any(
-            self.find_boundary(item_id).is_stitch_initial
-            for item_id in event.component_ids
-            if any(boundary.id == item_id for boundary in self.boundaries)
-        ):
-            raise ValueError("接缝初始化事件时刻固定不可移动")
         component_ids = set(event.component_ids)
         components = [item for item in self.boundaries if item.id in component_ids]
+        confirmations = [item for item in self.confirmations if item.id in component_ids]
+        if event.kind == ConfirmationKind.GAP_RECONFIRMATION.value or any(
+            item.is_gap_reconfirmation for item in [*components, *confirmations]
+        ):
+            raise ValueError("断档后重新确认标记时刻固定不可移动")
+        if event.kind == "stitch_initial" or any(item.is_stitch_initial for item in components):
+            raise ValueError("接缝初始化事件时刻固定不可移动")
         if not components:
             return 0, len(self.trial.seconds) - 1
         if any(item.sample_index == 0 for item in components):
@@ -854,9 +1110,25 @@ class AnnotationDocument:
         )
         if item is None:
             raise KeyError(component_id)
+        candidate = note
+        if getattr(item, "gap_key", ""):
+            gap = self._gap_for_component(item)
+            if gap is not None:
+                candidate = self._gap_note_with_user_text(gap, note)
+        if len(candidate) > 500:
+            raise ValueError("断档确认备注必须为不超过 500 字的单行文本")
         self._checkpoint()
-        item.user_note = note
-        self.dirty = self._state_dict() != self.baseline
+        item.user_note = candidate
+        self._changed()
+
+    @staticmethod
+    def _gap_note_with_user_text(gap, note: str) -> str:
+        note = note.strip()
+        template = gap_note_template(gap)
+        token = f"断档 {gap.start:.6f}–{gap.end:.6f} s"
+        if note.startswith("采集异常：") and token in note:
+            return note
+        return template if not note else f"{template}；{note}"
 
     def add_boundary(self, track: Track, sample_index: int, value: str) -> Boundary:
         self._assert_editable()
@@ -891,6 +1163,8 @@ class AnnotationDocument:
         item = self.find_boundary(boundary_id)
         if item.is_stitch_initial:
             raise ValueError("接缝初始化事件固定不可删除")
+        if item.is_gap_reconfirmation:
+            raise ValueError("断档后重新确认标记固定不可删除")
         if item.sample_index == 0:
             raise ValueError("起始状态不可删除")
         if item.provenance is Provenance.AUTO and not reason.strip():
@@ -905,8 +1179,33 @@ class AnnotationDocument:
         self._assert_editable()
         if not 0 <= sample_index < len(self.trial.seconds):
             raise ValueError("确认标记时刻超出试次范围")
+        gap = None
+        if kind is ConfirmationKind.GAP_RECONFIRMATION:
+            gap = next(
+                (
+                    item
+                    for item in self.trial.gap_contract().data_gaps
+                    if item.after_index == sample_index
+                ),
+                None,
+            )
+            if gap is None:
+                raise ValueError("断档后重新确认只能固定在断档后的首个真实采样点")
+            if any(
+                getattr(item, "gap_key", "") == gap_key(gap)
+                for item in [*self.boundaries, *self.confirmations]
+            ):
+                raise ValueError("该断档已经存在重新确认标记")
         self._checkpoint()
-        item = Confirmation(kind, int(sample_index), Provenance.MANUAL)
+        item = Confirmation(
+            kind,
+            int(sample_index),
+            Provenance.MANUAL,
+            gap_note_template(gap) if gap is not None else "",
+            gap_key=gap_key(gap) if gap is not None else "",
+        )
+        if gap is not None:
+            self._record_gap_evidence(item, gap)
         self.confirmations.append(item)
         self._changed()
         return item
@@ -914,6 +1213,8 @@ class AnnotationDocument:
     def delete_confirmation(self, confirmation_id: str, reason: str) -> None:
         self._assert_editable()
         item = next(value for value in self.confirmations if value.id == confirmation_id)
+        if item.is_gap_reconfirmation:
+            raise ValueError("断档后重新确认标记固定不可删除")
         if item.provenance is Provenance.AUTO and not reason.strip():
             raise ValueError("删除自动确认标记必须填写理由")
         self._checkpoint()
@@ -927,12 +1228,31 @@ class AnnotationDocument:
         issue = next(item for item in self.issues if item.id == issue_id)
         if resolution not in {"fixed", "accepted"}:
             raise ValueError("未知 QA 处理结论")
+        if issue.code == GAP_ISSUE_CODE and resolution != "accepted":
+            raise ValueError("采集异常断档必须选择确认无需修改")
         if resolution == "accepted" and not reason.strip():
             raise ValueError("确认无需修改时必须填写理由")
+        gap = self._gap_for_issue(issue)
+        basis = f"判断依据：{reason.strip()}"
+        updated_notes = {}
+        if gap is not None:
+            for component in [*self.boundaries, *self.confirmations]:
+                if getattr(component, "gap_key", "") != gap_key(gap):
+                    continue
+                updated = component.user_note
+                if basis not in updated:
+                    updated = f"{updated}；{basis}"
+                if len(updated) > 500:
+                    raise ValueError("断档判断依据过长，备注必须不超过 500 字")
+                updated_notes[component.id] = updated
         self._checkpoint()
         issue.resolution = resolution
         issue.reason = reason.strip()
-        self.dirty = self._state_dict() != self.baseline
+        if gap is not None:
+            for component in [*self.boundaries, *self.confirmations]:
+                if component.id in updated_notes:
+                    component.user_note = updated_notes[component.id]
+        self._changed()
 
     def attest(self, annotator_id: str, timestamp: str) -> None:
         self._assert_editable()

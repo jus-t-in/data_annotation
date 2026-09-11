@@ -50,6 +50,7 @@ KIND_NAMES = {
     "stitch_initial": "接缝初始化",
     ConfirmationKind.STAIR_SECOND_STEP.value: "第二步确认",
     ConfirmationKind.TRIAL_END.value: "收尾确认",
+    ConfirmationKind.GAP_RECONFIRMATION.value: "断档后重新确认",
 }
 SOURCE_NAMES = {
     Provenance.AUTO: "自动",
@@ -505,6 +506,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.confirmation_combo = QtWidgets.QComboBox()
         self.confirmation_combo.addItem("楼梯第二步确认", ConfirmationKind.STAIR_SECOND_STEP)
         self.confirmation_combo.addItem("试次收尾确认", ConfirmationKind.TRIAL_END)
+        self.confirmation_combo.addItem("断档后重新确认", ConfirmationKind.GAP_RECONFIRMATION)
         self.add_confirmation_button = QtWidgets.QPushButton("添加确认")
         confirmation_layout.addWidget(self.confirmation_combo, 1)
         confirmation_layout.addWidget(self.add_confirmation_button)
@@ -1227,7 +1229,11 @@ class AnnotationEditor(QtWidgets.QMainWindow):
 
     def _event_short_label(self, event) -> str:
         kind = KIND_NAMES[event.kind]
-        if event.kind in {ConfirmationKind.STAIR_SECOND_STEP.value, ConfirmationKind.TRIAL_END.value}:
+        if event.kind in {
+            ConfirmationKind.STAIR_SECOND_STEP.value,
+            ConfirmationKind.TRIAL_END.value,
+            ConfirmationKind.GAP_RECONFIRMATION.value,
+        }:
             return kind
         return f"{kind}  {self._state_name(event.activity, event.terrain)}"
 
@@ -1324,6 +1330,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             confirmation = event.kind in {
                 ConfirmationKind.STAIR_SECOND_STEP.value,
                 ConfirmationKind.TRIAL_END.value,
+                ConfirmationKind.GAP_RECONFIRMATION.value,
             }
             color = "#1f6f63" if selected else "#4f7881" if confirmation else "#69746f"
             line = pg.InfiniteLine(
@@ -1359,7 +1366,11 @@ class AnnotationEditor(QtWidgets.QMainWindow):
                 border=pg.mkPen(color, width=1 if selected else 0.7),
                 fill=pg.mkBrush("#edf7f3" if selected else "#ffffff"),
                 ensureInBounds=False,
-                draggable=not document.is_read_only and event.kind not in {"initial", "stitch_initial"},
+                draggable=not document.is_read_only and event.kind not in {
+                    "initial",
+                    "stitch_initial",
+                    ConfirmationKind.GAP_RECONFIRMATION.value,
+                },
             )
             label.setFont(QtGui.QFont("Noto Sans CJK SC", 8, QtGui.QFont.Weight.Medium))
             label.setToolTip(self._event_tooltip(event))
@@ -1441,6 +1452,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
                     not document.is_read_only
                     and boundary.sample_index != 0
                     and not boundary.is_stitch_initial
+                    and not boundary.is_gap_reconfirmation
                 ),
                 pen=pg.mkPen(color, width=3 if selected else 2, style=provenance_style[boundary.provenance]),
                 hoverPen=pg.mkPen("#a84d45", width=4),
@@ -1456,7 +1468,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             line = pg.InfiniteLine(
                 pos=float(trial.seconds[confirmation.sample_index]),
                 angle=90,
-                movable=not document.is_read_only,
+                movable=not document.is_read_only and not confirmation.is_gap_reconfirmation,
                 pen=pg.mkPen("#4f7881", width=3 if selected else 2, style=QtCore.Qt.PenStyle.DashLine),
                 hoverPen=pg.mkPen("#a84d45", width=4),
                 span=(0.70, 0.98),
@@ -1622,7 +1634,11 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             if isinstance(component, Boundary):
                 label = labels[component.track]
             else:
-                label = "第二步确认" if component.kind is ConfirmationKind.STAIR_SECOND_STEP else "收尾确认"
+                label = {
+                    ConfirmationKind.STAIR_SECOND_STEP: "第二步确认",
+                    ConfirmationKind.TRIAL_END: "收尾确认",
+                    ConfirmationKind.GAP_RECONFIRMATION: "断档后重新确认",
+                }[component.kind]
             self.component_combo.addItem(label, component.id)
         preferred = (
             self.selected_component_id
@@ -1676,7 +1692,13 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             "  ".join(f"{name} {value:.3f}" for name, value in signals.items()) or "无自动证据记录"
         )
         editable = not self.document.is_read_only
-        fixed = isinstance(component, Boundary) and component.is_stitch_initial
+        fixed = (
+            isinstance(component, Boundary)
+            and (component.is_stitch_initial or component.is_gap_reconfirmation)
+        ) or (
+            isinstance(component, Confirmation)
+            and component.is_gap_reconfirmation
+        )
         self.note_edit.setEnabled(editable)
         self.time_spin.setEnabled(editable and component.sample_index != 0 and not fixed)
         self.previous_sample_button.setEnabled(editable and component.sample_index > 0 and not fixed)
@@ -1698,6 +1720,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         confirmation = callout.event.kind in {
             ConfirmationKind.STAIR_SECOND_STEP.value,
             ConfirmationKind.TRIAL_END.value,
+            ConfirmationKind.GAP_RECONFIRMATION.value,
         }
         style = (
             QtCore.Qt.PenStyle.DashLine
@@ -1931,7 +1954,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.qa_list.clear()
         for issue in self.document.issues:
             prefix = "[已闭环]" if issue.resolved else "[阻断]" if issue.severity is Severity.BLOCKING else "[提示]"
-            interval = f" [{issue.start:.3f}–{issue.end:.3f}s]" if issue.start is not None and issue.end is not None else ""
+            interval = f" [{issue.start:.6f}–{issue.end:.6f} s]" if issue.start is not None and issue.end is not None else ""
             item = QtWidgets.QListWidgetItem(f"{prefix}{interval} {issue.message}")
             item.setData(QtCore.Qt.ItemDataRole.UserRole, issue.id)
             item.setToolTip(issue.message)
