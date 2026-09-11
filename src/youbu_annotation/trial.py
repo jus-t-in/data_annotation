@@ -106,7 +106,7 @@ class TrialFileInfo:
 
 
 _V3_FILE_RE = re.compile(
-    r"^(?P<session>P\d+_S\d+)_(?P<trial>T0[1-5])_v3(?:_(?P<part>1\+2|1|2))?\.csv$",
+    r"^(?P<session>P\d+_S\d+)_(?P<trial>T0[1-6])_v3(?:_(?P<part>1\+2|1|2))?\.csv$",
     re.IGNORECASE,
 )
 
@@ -213,7 +213,7 @@ class TrialData:
         trial_id: str | None = None,
     ) -> "TrialData":
         path = path.resolve()
-        match = legacy.FILE_RE.match(path.name)
+        match = _V3_FILE_RE.fullmatch(path.name) or legacy.FILE_RE.match(path.name)
         if not match and (not session_id or not trial_id):
             raise TrialValidationError([f"文件名不符合试次协议：{path.name}"])
         try:
@@ -332,6 +332,8 @@ class TrialData:
         channels["display/left"] = _smooth(left_raw)
         channels["display/pitch_raw"] = pitch_raw
         channels["display/pitch"] = uniform_filter1d(pitch_raw, min(25, len(seconds)), mode="nearest")
+        channels["display/gyro_y_raw"] = gyro[:, 1]
+        channels["display/gyro_y"] = uniform_filter1d(gyro[:, 1], min(25, len(seconds)), mode="nearest")
         gyro_slow = uniform_filter1d(gyro, min(101, len(seconds)), axis=0, mode="nearest")
         channels["display/motion"] = np.linalg.norm(gyro - gyro_slow, axis=1)
         accel_mag = np.linalg.norm(accel, axis=1)

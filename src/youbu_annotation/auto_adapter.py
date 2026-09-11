@@ -35,7 +35,7 @@ def recognize(trial: TrialData) -> AnnotationDocument:
     )
     flags = legacy.qa_check(trial.trial_id, events, detail)
     schema = DEFAULT_V3_SCHEMA if trial.is_v3 else DEFAULT_V2_SCHEMA
-    legacy_qa_only = trial.is_v3 and trial.trial_id in {"T04", "T05"}
+    legacy_qa_only = trial.is_v3 and trial.trial_id in {"T04", "T05", "T06"}
     issues = [
         ReviewIssue(
             code="automatic_qa",
@@ -81,13 +81,13 @@ def recognize(trial: TrialData) -> AnnotationDocument:
             "audit": {"video_files": []},
             "batch_note": (
                 "曲面斜坡桥；局部坡面约 10–15°；精确角度和长度不作为标签维度"
-                if trial.is_v3 and trial.trial_id in {"T04", "T05"}
+                if trial.is_v3 and trial.trial_id in {"T04", "T05", "T06"}
                 else ""
             ),
         },
     )
     document.ensure_stitch_initial_event(checkpoint=False)
-    if trial.is_v3 and trial.trial_id in {"T04", "T05"}:
+    if trial.is_v3 and trial.trial_id in {"T04", "T05", "T06"}:
         terrain_intervals = []
         terrain_boundaries = sorted(
             document.track_boundaries(Track.TERRAIN),

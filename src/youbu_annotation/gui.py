@@ -199,7 +199,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.auxiliary_actions: dict[str, QtGui.QAction] = {}
         for name, label, default in (
             ("overview", "全局概览", True),
-            ("pitch", "俯仰", False),
+            ("pitch", "Y 轴角速度", False),  # 保留原栏位的显隐设置键。
             ("motion", "运动/冲击", False),
         ):
             action = QtGui.QAction(label, self)
@@ -657,7 +657,7 @@ class AnnotationEditor(QtWidgets.QMainWindow):
             plot.setClipToView(True)
             plot.setDownsampling(auto=True, mode="peak")
         self.leg_plot.setLabel("left", "腿部位置")
-        self.pitch_plot.setLabel("left", "俯仰")
+        self.pitch_plot.setLabel("left", "Y 轴角速度")
         self.motion_plot.setLabel("left", "运动/冲击")
         self.state_plot.setLabel("bottom", "试次内相对时间", units="s")
         self.state_plot.getAxis("left").setTicks([[(0.45, "地形"), (1.45, "活动"), (2.45, "确认")]])
@@ -1187,13 +1187,16 @@ class AnnotationEditor(QtWidgets.QMainWindow):
         self.overview_plot.plot(x, trial.channels["display/right"], pen=pg.mkPen(RIGHT_COLOR, width=1), **plot_options)
         self.leg_plot.plot(x, trial.channels["display/left"], pen=pg.mkPen(LEFT_COLOR, width=1.2), name="左腿", **plot_options)
         self.leg_plot.plot(x, trial.channels["display/right"], pen=pg.mkPen(RIGHT_COLOR, width=1.2), name="右腿", **plot_options)
-        self.pitch_plot.plot(x, trial.channels["display/pitch"], pen=pg.mkPen(PITCH_COLOR, width=1.1), **plot_options)
+        self.pitch_plot.addItem(pg.InfiniteLine(
+            pos=0, angle=0, movable=False, pen=pg.mkPen("#b9c4be", width=0.8),
+        ))
+        self.pitch_plot.plot(x, trial.channels["display/gyro_y"], pen=pg.mkPen(PITCH_COLOR, width=1.1), **plot_options)
         self.motion_plot.plot(x, trial.channels["display/motion"], pen=pg.mkPen(MOTION_COLOR, width=1), **plot_options)
         self.motion_plot.plot(x, trial.channels["display/impact"], pen=pg.mkPen(IMPACT_COLOR, width=1), **plot_options)
         self._raw_curves = [
             self.leg_plot.plot(x, trial.channels["display/left_raw"], pen=pg.mkPen(LEFT_COLOR, width=0.6, style=QtCore.Qt.PenStyle.DashLine), **plot_options),
             self.leg_plot.plot(x, trial.channels["display/right_raw"], pen=pg.mkPen(RIGHT_COLOR, width=0.6, style=QtCore.Qt.PenStyle.DashLine), **plot_options),
-            self.pitch_plot.plot(x, trial.channels["display/pitch_raw"], pen=pg.mkPen("#87938d", width=0.6, style=QtCore.Qt.PenStyle.DashLine), **plot_options),
+            self.pitch_plot.plot(x, trial.channels["display/gyro_y_raw"], pen=pg.mkPen("#87938d", width=0.6, style=QtCore.Qt.PenStyle.DashLine), **plot_options),
         ]
         for plot in (self.overview_plot, self.leg_plot, self.pitch_plot, self.motion_plot):
             for curve in plot.listDataItems():
