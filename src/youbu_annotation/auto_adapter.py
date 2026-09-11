@@ -12,6 +12,10 @@ from .model import AnnotationDocument, ReviewIssue, Severity, Track
 from .trial import TrialData, sha256_file
 
 
+def _is_legacy_gap_flag(flag: str) -> bool:
+    return flag.removeprefix("提示：").startswith("数据断档")
+
+
 def recognize(trial: TrialData) -> AnnotationDocument:
     left_column = next(
         name for name in (legacy.LEFT_COLUMN, legacy.LEFT_COLUMN_ALT) if name in trial.channels
@@ -40,20 +44,13 @@ def recognize(trial: TrialData) -> AnnotationDocument:
         )
         for flag in flags
         if not legacy_qa_only
+        and not (trial.is_v3 and _is_legacy_gap_flag(flag))
     ]
     issues.extend(
         ReviewIssue("input_warning", warning, Severity.WARNING)
         for warning in trial.warnings
     )
     gap_contract = trial.gap_contract()
-    if gap_contract.errors:
-        issues.append(
-            ReviewIssue(
-                "input_gap_contract",
-                "；".join(gap_contract.errors),
-                Severity.BLOCKING,
-            )
-        )
     suggestion = (
         {
             "source": "v2",
@@ -133,6 +130,7 @@ def recognize(trial: TrialData) -> AnnotationDocument:
         document.detail["terrain_intervals"] = terrain_intervals
     for component in [*document.boundaries, *document.confirmations]:
         component.evidence = {
+            **component.evidence,
             "sample_index": component.sample_index,
             "signals": trial.values_at(component.sample_index),
             "recognizer_note": (component.original or {}).get("notes", ""),

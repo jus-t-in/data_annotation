@@ -109,6 +109,7 @@ class AnnotationApplication:
                 "boundaries": [item.to_dict() for item in document.boundaries],
                 "confirmations": [item.to_dict() for item in document.confirmations],
                 "issues": [item.to_dict() for item in document.issues],
+                "gap_declarations": document.gap_declarations(),
                 "events": [self._event_view(trial, item) for item in document.composed_events()],
                 "intervals": [
                     {

@@ -7,7 +7,7 @@ import hashlib
 
 APP_NAME = "步态数据标注器"
 VERSION = "0.1.0"
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 
 OUTPUT_FIELDS = (
     "session_id",

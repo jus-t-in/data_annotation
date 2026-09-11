@@ -429,10 +429,8 @@ class TrialData:
     def stitch_gap(self) -> DataGap | None:
         if not self.is_t04_merged:
             return None
-        return self.gaps[0] if len(self.gaps) == 1 else next(
-            (gap for gap in self.gaps if abs(gap.duration - 3.0) <= 0.001),
-            None,
-        )
+        candidates = [gap for gap in self.gaps if abs(gap.duration - 3.0) <= 0.001]
+        return candidates[0] if len(candidates) == 1 else None
 
     @property
     def has_legal_stitch(self) -> bool:
@@ -446,16 +444,24 @@ class TrialData:
         gaps = tuple(self.gaps)
         info = self.file_info
         errors: list[str] = []
-        stitch_gap = self.stitch_gap
+        stitch_gap = None
+        data_gaps = gaps
         if info.is_v3:
             if info.is_merged:
-                if len(gaps) != 1:
-                    errors.append("T04 合并文件必须且只能有一个接缝断档")
-                elif abs(gaps[0].duration - 3.0) > 0.001:
-                    errors.append("T04 接缝断档必须为 3.000 s ± 0.001 s")
+                candidates = [gap for gap in gaps if abs(gap.duration - 3.0) <= 0.001]
+                if len(candidates) > 1:
+                    errors.append("T04 合并文件存在多个约 3 秒接缝断档")
+                elif not candidates:
+                    if len(gaps) == 1:
+                        errors.append("T04 接缝断档必须为 3.000 s ± 0.001 s")
+                    else:
+                        errors.append("T04 合并文件缺少唯一约 3 秒接缝断档")
+                else:
+                    stitch_gap = candidates[0]
+                    data_gaps = tuple(gap for gap in gaps if gap != stitch_gap)
             elif gaps:
-                errors.append("V3 正式/源文件存在未声明数据断档")
-        return GapContract(gaps, stitch_gap, tuple(errors))
+                data_gaps = gaps
+        return GapContract(data_gaps, stitch_gap, tuple(errors))
 
     def time_display(self, index: int) -> dict[str, float | str | None]:
         index = int(index)
