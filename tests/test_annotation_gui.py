@@ -39,6 +39,8 @@ def trial() -> TrialData:
             "display/left": -np.sin(seconds),
             "display/right": np.sin(seconds),
             "display/pitch": zero,
+            "display/gyro_y": np.sin(seconds),
+            "display/gyro_y_raw": 2 * np.sin(seconds),
             "display/motion": np.abs(np.sin(seconds)),
             "display/impact": zero,
             "display/left_raw": -np.sin(seconds),
